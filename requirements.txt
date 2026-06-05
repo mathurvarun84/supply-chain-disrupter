@@ -1,0 +1,11 @@
+langchain
+langgraph
+transformers
+torch
+feedparser
+simpy
+prophet
+gradio
+pandas
+numpy
+requests
