@@ -80,6 +80,12 @@ The project will utilize a combination of public datasets, APIs, and synthetic d
 └── README.md               # Project documentation
 ```
 
+## Evaluation
+
+- Measure risk classification accuracy.
+- Evaluate demand forecast deviation.
+- Assess simulation realism and mitigation recommendation quality.
+
 ## Challenges
 
 - **Real-Time Data Integration:** Continuously processing multiple external data sources reliably.
