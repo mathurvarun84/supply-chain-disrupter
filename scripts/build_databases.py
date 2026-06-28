@@ -4,7 +4,7 @@ import argparse
 import json
 
 from src.utils.etl_loader import get_sqlite_stats, load_excel_into_sqlite
-from src.utils.rag_utils import build_rag_corpus_complete, query_chroma_rag
+from src.rag.utils import build_rag_corpus_complete, query_chroma_rag
 
 
 def main() -> None:
