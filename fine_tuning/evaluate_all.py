@@ -23,7 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def evaluate_distilbert() -> dict:
-    """Run fine-tuned DistilBERT on held-out test split."""
+    """
+    Evaluate fine-tuned DistilBERT on the held-out test split.
+
+    Loads distilbert_test_split.json, runs predict_label() on all test texts,
+    computes macro F1 and per-class report, and saves a confusion matrix PNG.
+    Returns metrics dict with target_achieved flag (F1 >= 0.80).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -78,7 +84,12 @@ def evaluate_distilbert() -> dict:
 
 
 def evaluate_embeddings() -> dict:
-    """Load retrieval metrics from finetune_embeddings.py output."""
+    """
+    Load embedding fine-tuning retrieval metrics from disk.
+
+    Reads retrieval_metrics.json written by finetune_embeddings.py (baseline vs
+    fine-tuned Accuracy@3). Returns empty dict if the file does not exist.
+    """
     metrics_path = Path("fine_tuning/models/supply_chain_embeddings/retrieval_metrics.json")
     if not metrics_path.exists():
         logger.warning("Embedding metrics not found")
@@ -88,7 +99,13 @@ def evaluate_embeddings() -> dict:
 
 
 def evaluate_cross_encoder_reranking() -> dict:
-    """Demonstrate cross-encoder reranking value."""
+    """
+    Demonstrate two-stage RAG: bi-encoder retrieval + cross-encoder reranking.
+
+    Runs a sample Taiwan earthquake query through raw collection search and
+    retrieve_and_rerank(), returning hit counts for each stage. Skipped if RAG
+    collections or cross-encoder are unavailable.
+    """
     try:
         from src.rag.retriever import retrieve_and_rerank
         from src.rag.collections import query_collection
@@ -104,7 +121,12 @@ def evaluate_cross_encoder_reranking() -> dict:
 
 
 def evaluate_gpt_finetuned() -> dict:
-    """Load GPT fine-tuning result."""
+    """
+    Load GPT-4o-mini fine-tuning job metadata from disk.
+
+    Reads gpt_ft_result.json (file_id, job_id, model_id) written by
+    finetune_gpt4o_mini.py. Returns empty dict if fine-tuning was not run.
+    """
     result_path = Path("fine_tuning/data/gpt_ft_result.json")
     if not result_path.exists():
         return {}
@@ -113,7 +135,12 @@ def evaluate_gpt_finetuned() -> dict:
 
 
 def run_all_evaluations() -> dict:
-    """Run all evaluations and produce consolidated report."""
+    """
+    Run all Day 23 capstone evaluations and write a consolidated report.
+
+    Executes DistilBERT test eval, loads embedding/GPT metrics, runs a cross-encoder
+    demo, and saves everything to fine_tuning/data/evaluation_report.json.
+    """
     logger.info("=== DAY 23 — CAPSTONE EVALUATION ===\n")
     results = {
         "distilbert": evaluate_distilbert(),

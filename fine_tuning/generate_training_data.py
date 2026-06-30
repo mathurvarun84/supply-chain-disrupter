@@ -36,12 +36,20 @@ DURATION_AUGMENT_DAYS = (0.0, 2.0, 5.0, 30.0)
 
 
 def _augment_train_rows(rows: list[dict]) -> tuple[list[str], list[int]]:
-    """Expand training rows with multiple duration values and escalated labels."""
+    """
+    Expand each training row into four examples with different disruption durations.
+
+    For every source row, generates texts at 0/2/5/30 days and applies the duration
+    escalation matrix so labels reflect the >=4-day CRITICAL hard floor. Used on
+    the train split only — val/test are not augmented.
+    """
     texts, labels = [], []
     for row in rows:
+        # Start from the ground-truth label in SQLite (not delivery_status).
         base = str(row.get("disruption_event_label") or "LOW").strip().upper()
         for dur in DURATION_AUGMENT_DAYS:
             dur_input = None if dur <= 0 else dur
+            # Apply duration escalation matrix: >=4 days forces CRITICAL.
             final, _ = _escalate_label(base, dur_input)
             texts.append(build_distilbert_text(row, duration_days=dur))
             labels.append(LABEL2ID.get(final, 0))
@@ -49,9 +57,22 @@ def _augment_train_rows(rows: list[dict]) -> tuple[list[str], list[int]]:
 
 
 def load_distilbert_data() -> tuple:
-    """Load labeled rows from lite_master. Returns (X_train, y_train, X_val, y_val)."""
+    """
+    Build DistilBERT training/validation splits from SQLite lite_master.
+
+    Queries Signal 2 features (excluding delivery_status), performs a stratified
+    80/10/10 split, applies duration augmentation on train, and saves the held-out
+    test set to fine_tuning/data/distilbert_test_split.json.
+
+    Returns:
+        (X_train, y_train, X_val, y_val) — lists of text strings and integer labels.
+    """
     from sklearn.model_selection import train_test_split
 
+    # Step 1 — Query SQLite for Signal 2 features + ground-truth label.
+    # delivery_status is deliberately omitted from SELECT (see build_distilbert_text):
+    # including it would let DistilBERT trivially map status strings to labels.
+    # known_disruption_event gives macro context (COVID, chip shortage, etc.).
     rows = execute_query(
         """SELECT order_region, product_name,
                   known_disruption_event,
@@ -65,10 +86,12 @@ def load_distilbert_data() -> tuple:
     )
     rows = [dict(r) for r in rows]
 
+    # Step 2 — Map string labels to integers 0–3 for the classification head.
     raw_labels = [
         LABEL2ID.get(str(r["disruption_event_label"]).strip().upper(), 0) for r in rows
     ]
 
+    # Step 3 — Log class balance and macro-event coverage for training audit.
     dist = Counter(str(r["disruption_event_label"]) for r in rows)
     logger.info("DistilBERT label distribution (raw): %s", dict(dist))
     logger.info("Total source rows: %d", len(rows))
@@ -79,6 +102,8 @@ def load_distilbert_data() -> tuple:
     event_dist = {str(r.get("known_disruption_event", "—")) for r in rows}
     print(f"      Macro events present in training data: {sorted(event_dist)}")
 
+    # Step 4 — Stratified 80/10/10 split (train / val / test).
+    # Stratify preserves CRITICAL/HIGH/MEDIUM/LOW proportions in each fold.
     train_rows, temp_rows, _, temp_labels = train_test_split(
         rows, raw_labels, test_size=0.20, random_state=42, stratify=raw_labels
     )
@@ -86,12 +111,16 @@ def load_distilbert_data() -> tuple:
         temp_rows, temp_labels, test_size=0.50, random_state=42, stratify=temp_labels
     )
 
+    # Step 5 — Build model inputs as natural-language strings via build_distilbert_text().
+    # Train set only: 4× duration augmentation (0/2/5/30 days) with escalated labels.
+    # Val/test: single text per row at duration=0 (no augmentation, no label change).
     X_train, y_train = _augment_train_rows(train_rows)
     X_val = [build_distilbert_text(r, duration_days=0.0) for r in val_rows]
     y_val = val_raw_labels
     X_test = [build_distilbert_text(r, duration_days=0.0) for r in test_rows]
     y_test = test_raw_labels
 
+    # Step 6 — Persist held-out test split for offline evaluation (evaluate_all.py).
     with open("fine_tuning/data/distilbert_test_split.json", "w") as f:
         json.dump({"texts": X_test, "labels": y_test}, f)
     logger.info(
@@ -102,7 +131,13 @@ def load_distilbert_data() -> tuple:
 
 
 def generate_qa_pairs_from_semiconductor_signals() -> list:
-    """Source 1: semiconductor_signals rows → query/passage pairs."""
+    """
+    Build query→passage pairs from semiconductor_signals table rows.
+
+    Each known disruption event (COVID, chip shortage, export controls, etc.)
+    becomes a dense passage plus four paraphrased queries for RAG bi-encoder
+    fine-tuning. Returns list of (query, passage) tuples.
+    """
     rows = execute_query(
         """SELECT year, country, company, known_disruption_event, known_severity,
                   supply_disruption_index, export_control_level, chip_price_index,
@@ -136,7 +171,12 @@ def generate_qa_pairs_from_semiconductor_signals() -> list:
 
 
 def generate_mitigation_qa_pairs() -> list:
-    """Source 2: mitigation recommendations from lite_master."""
+    """
+    Build query→passage pairs from lite_master mitigation recommendations.
+
+    Groups unique (risk_label, recommendation) pairs and generates queries asking
+    how to respond to each disruption severity level. Returns list of (query, passage) tuples.
+    """
     rows = execute_query(
         """SELECT disruption_event_label, mitigation_recommendation,
                   order_region, risk_score_composite
@@ -164,7 +204,13 @@ def generate_mitigation_qa_pairs() -> list:
 
 
 def generate_chromadb_qa_pairs() -> list:
-    """Source 3: ChromaDB query → QA pairs from retrieved chunks."""
+    """
+    Build query→passage pairs by querying existing ChromaDB collections.
+
+    Runs fixed supply-chain topics against ChromaDB and pairs each retrieved chunk
+    with synthetic queries. Skipped gracefully if ChromaDB is empty or unavailable.
+    Returns list of (query, passage) tuples.
+    """
     try:
         from src.rag.utils import query_chroma_rag
     except ImportError:
@@ -198,7 +244,13 @@ def generate_chromadb_qa_pairs() -> list:
 
 
 def save_all_qa_pairs() -> list:
-    """Combine all QA sources, deduplicate, save to fine_tuning/data/qa_pairs.json."""
+    """
+    Merge all QA sources, deduplicate, shuffle, and save to qa_pairs.json.
+
+    Combines semiconductor signals, mitigation text, and ChromaDB chunks into one
+    file consumed by finetune_embeddings.py. Returns the list of unique dicts
+    with keys {query, positive}.
+    """
     sc_pairs = generate_qa_pairs_from_semiconductor_signals()
     mit_pairs = generate_mitigation_qa_pairs()
     chroma_pairs = generate_chromadb_qa_pairs()
@@ -224,7 +276,14 @@ def save_all_qa_pairs() -> list:
 
 
 def generate_gpt_finetune_jsonl() -> str:
-    """Generate JSONL for GPT-4o-mini fine-tuning (News Agent L2)."""
+    """
+    Generate OpenAI fine-tuning JSONL for the News Agent (GPT-4o-mini L2).
+
+    Maps semiconductor_signals disruption events to ground-truth JSON responses
+    (category, severity, regions, commodities, duration) using keyword matching.
+    Each line is a {messages: [system, user, assistant]} conversation saved to
+    fine_tuning/data/gpt_finetune_train.jsonl. Returns the output file path.
+    """
     try:
         from src.agents.news_agent import NEWS_SYSTEM_PROMPT
     except ImportError:

@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 
 
 def _in_colab() -> bool:
+    """Return True when running inside a Google Colab notebook environment."""
     try:
         import google.colab  # noqa: F401
         return True
@@ -75,7 +76,12 @@ def _in_colab() -> bool:
 
 
 def install_dependencies() -> None:
-    """Install training deps (Colab usually needs this once per session)."""
+    """
+    Install or verify all Python packages needed for GPU fine-tuning on Colab.
+
+    Covers transformers, torch, sentence-transformers, datasets, huggingface_hub,
+    and project data dependencies (pandas, openpyxl, chromadb, pypdf).
+    """
     packages = [
         "transformers>=4.40.0",
         "torch",
@@ -98,6 +104,12 @@ def install_dependencies() -> None:
 
 
 def login_huggingface() -> None:
+    """
+    Authenticate with Hugging Face Hub for model upload.
+
+    Uses HF_TOKEN from environment. Skipped when SKIP_HF_UPLOAD=1. Required before
+    upload_to_huggingface() can push models to mathurvarun84/* repos.
+    """
     if SKIP_HF_UPLOAD:
         logger.info("SKIP_HF_UPLOAD=1 — skipping Hugging Face login.")
         return
@@ -113,7 +125,14 @@ def login_huggingface() -> None:
 
 
 def ensure_database() -> None:
-    """Build SQLite from Excel. ChromaDB is rebuilt after embedding fine-tune."""
+    """
+    Build SQLite database from supply_chain_lite_master.xlsx.
+
+    Runs etl_loader.load_excel_into_sqlite() to populate outputs/supply_chain.db.
+    ChromaDB is intentionally deferred until after embedding fine-tune so the
+    empty fine_tuning/models/ directory does not cause weight-loading errors.
+    Skipped when SKIP_DB_BUILD=1 and the DB already exists.
+    """
     if SKIP_DB_BUILD and SQLITE_PATH.exists():
         logger.info("SKIP_DB_BUILD=1 and DB exists — skipping build.")
         return
@@ -137,7 +156,12 @@ def ensure_database() -> None:
 
 
 def rebuild_chromadb() -> None:
-    """Rebuild ChromaDB using the fine-tuned (or base) embedding model."""
+    """
+    Rebuild ChromaDB vector store using the fine-tuned embedding model.
+
+    Flushes and re-indexes all RAG corpora (workbook, playbooks, PDFs) with the
+    embedder saved at fine_tuning/models/supply_chain_embeddings/.
+    """
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, str(PROJECT_ROOT))
     from src.rag.utils import build_rag_corpus_complete
@@ -148,6 +172,12 @@ def rebuild_chromadb() -> None:
 
 
 def generate_training_data() -> None:
+    """
+    Generate all local training artifacts needed before fine-tuning.
+
+    Calls load_distilbert_data() for Signal 2 splits and save_all_qa_pairs()
+    for RAG bi-encoder training data. Outputs go to fine_tuning/data/.
+    """
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, str(PROJECT_ROOT))
     from fine_tuning.generate_training_data import load_distilbert_data, save_all_qa_pairs
@@ -159,6 +189,13 @@ def generate_training_data() -> None:
 
 
 def train_distilbert() -> Path:
+    """
+    Fine-tune DistilBERT on Colab GPU for 4-class supply chain risk classification.
+
+    Mirrors finetune_distilbert.run_finetuning() inline: load data, tokenize,
+    train with early stopping on f1_macro, save model + validation metrics.
+    Returns path to fine_tuning/models/distilbert_risk_classifier/.
+    """
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -225,6 +262,7 @@ def train_distilbert() -> Path:
     )
 
     def compute_metrics(eval_pred):
+        """Trainer callback: macro F1, weighted F1, precision, recall on validation."""
         logits, labels = eval_pred
         predictions = np.argmax(logits, axis=-1)
         return {
@@ -266,6 +304,13 @@ def train_distilbert() -> Path:
 
 
 def train_embeddings() -> Path:
+    """
+    Fine-tune all-MiniLM-L6-v2 bi-encoder on Colab GPU for RAG retrieval.
+
+    Mirrors finetune_embeddings.run_embedding_finetuning() inline: load QA pairs,
+    baseline Accuracy@3 eval, 3-epoch contrastive training, save best model +
+    retrieval_metrics.json. Returns path to supply_chain_embeddings/.
+    """
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -355,6 +400,13 @@ def train_embeddings() -> Path:
 
 
 def upload_to_huggingface(distilbert_path: Path, embedding_path: Path) -> None:
+    """
+    Upload both fine-tuned models to Hugging Face Hub.
+
+    Creates repos if needed (409 Conflict on existing repos is OK), uploads model
+    folders via HfApi.upload_folder(), and attaches README model cards. Skipped
+    when SKIP_HF_UPLOAD=1. Repos default to {HF_USERNAME}/supply-chain-*.
+    """
     if SKIP_HF_UPLOAD:
         logger.info("Skipping Hugging Face upload.")
         return
@@ -491,6 +543,12 @@ python scripts/build_rag_collections.py --flush
 
 
 def make_models_zip(distilbert_path: Path, embedding_path: Path) -> Path | None:
+    """
+    Zip both fine-tuned model folders for local download from Colab.
+
+    Creates fine_tuning/models/finetuned_models_for_local.zip and triggers a
+    Colab browser download when running in notebook. Skipped when MAKE_DOWNLOAD_ZIP=0.
+    """
     if not MAKE_DOWNLOAD_ZIP:
         return None
     zip_path = PROJECT_ROOT / "fine_tuning" / "models" / "finetuned_models_for_local.zip"
@@ -516,6 +574,12 @@ def make_models_zip(distilbert_path: Path, embedding_path: Path) -> Path | None:
 
 
 def print_local_setup(distilbert_path: Path, embedding_path: Path) -> None:
+    """
+    Print post-training instructions for using models locally.
+
+    Shows Hugging Face repo IDs for .env and local folder paths for zip copy,
+    plus the ChromaDB rebuild command.
+    """
     print("\n" + "=" * 72)
     print("DONE — use models locally")
     print("=" * 72)
@@ -531,6 +595,13 @@ def print_local_setup(distilbert_path: Path, embedding_path: Path) -> None:
 
 
 def main() -> None:
+    """
+    Colab one-shot orchestrator: deps → DB → data → train → ChromaDB → upload → zip.
+
+    Controlled by environment flags: SKIP_DB_BUILD, SKIP_DISTILBERT,
+    SKIP_EMBEDDINGS, SKIP_HF_UPLOAD, MAKE_DOWNLOAD_ZIP. Run after setting HF_TOKEN
+    and uploading supply_chain_lite_master.xlsx.
+    """
     os.chdir(PROJECT_ROOT)
     sys.path.insert(0, str(PROJECT_ROOT))
 
