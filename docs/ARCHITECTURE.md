@@ -11,32 +11,50 @@ L1 Data Ingestion → L2 News (gpt-4.1-mini) → L3 Weather (gpt-4.1-mini)
                   → L7 Mitigation (gpt-4o)
 ```
 
+**Separation of concerns:** L1 fetches live data (GDELT/RSS, Open-Meteo) and writes to SQLite. L2/L3 read from SQLite and enrich with LLM + RAG — they do not call live news or weather APIs on the primary path.
+
+## L1 — Data Ingestion
+
+**Module:** `src/agents/data_ingestion/live_ingest.py`
+
+| Source | SQLite table | Notes |
+|--------|--------------|-------|
+| Open-Meteo | `weather_signals` | One row per hub per day; rule-based severity pre-computed |
+| GDELT / RSS | `news_signals` | Deduped by `content_hash`; coarse region/category tags |
+
 ## L2 — News Agent
 
-**Model:** `gpt-4.1-mini` (or fine-tuned via `OPENAI_FT_NEWS_MODEL`)
+**Module:** `src/agents/news_agent/agent.py`  
+**Model:** `gpt-4.1-mini` (`MODEL_FAST`)
 
 **Flow:**
-1. Fetch SQLite record + semiconductor_signals for the order year
-2. Issue 3 ChromaDB RAG queries via `build_rag_context()`
-3. Call OpenAI structured output → `NewsAnalysisLLMOutput`
-4. Translate to `NewsRiskSignal` list (primary + regional signals)
-5. `news_severity_component` feeds freight component (weight 0.15) in L4
+1. Read live news from `news_signals` via `fetch_recent_news()` (L1 output — no GDELT/RSS calls)
+2. Fetch `semiconductor_signals` for the order year
+3. Issue 3 ChromaDB RAG queries via `build_rag_context()`
+4. Call OpenAI structured output → `NewsAnalysisLLMOutput`
+5. Translate to `NewsRiskSignal` list (primary + up to 3 regional signals at 0.75× severity)
+6. `news_severity_component` feeds freight component (weight 0.15) in L4
 
-**Fallback:** `FALLBACK_PARAMS` dict or `src.rag.agent.build_news_signals()` when no API key
+**Fallback chain (when OpenAI unavailable or fails):**
+1. `FALLBACK_PARAMS` dict (calibrated per disruption type; +0.05 if >5 live news rows)
+2. `src.rag.agent.build_news_signals()` for unknown disruption types
 
 ## L3 — Weather Agent
 
-**Model:** `gpt-4.1-mini`
+**Module:** `src/agents/weather_agent/agent.py`  
+**Model:** `gpt-4.1-mini`  
+**HTTP client (L1 only):** `src/agents/weather_agent/client.py`
 
 **Flow:**
-1. Fetch Open-Meteo hourly data for record coordinates
-2. Compute rule-based `numeric_severity` via `compute_weather_severity()`
-3. Find nearest semiconductor hub (12-hub map)
-4. If `numeric_severity >= 0.40`, pre-fetch weather RAG context
-5. LLM produces `geo_risk_component` which **overrides** numeric severity
-6. `live_weather_severity` feeds geo component (weight 0.40) in L4
+1. Resolve coordinates from active record or port config
+2. Find nearest semiconductor hub (12-hub map)
+3. **Primary:** read `weather_signals` via `fetch_latest_weather_signal()` (L1 output)
+4. **Fallback:** live Open-Meteo only when no SQLite row exists (demo/manual mode)
+5. If `numeric_severity >= 0.40`, pre-fetch weather RAG context
+6. LLM produces `geo_risk_component` which **overrides** numeric severity
+7. `live_weather_severity` feeds geo component (weight 0.40) in L4
 
-**Fallback:** Returns rule-based numeric severity unchanged
+**Fallback:** Returns rule-based numeric severity from SQLite (or live API) unchanged when LLM fails
 
 ## L4 — Risk Classifier (Three-Signal Ensemble)
 
@@ -92,7 +110,7 @@ CLI: `python scripts/build_rag_collections.py` (delegates to `src/rag/collection
 |----------------|---------|
 | `distilbert_risk_classifier/` | Signal 2 (distilbert_signal.py) |
 | `supply_chain_embeddings/` | Stage 1 RAG (`src/rag/utils.get_embedding_model()`) |
-| `gpt_ft_result.json` | L2 News Agent via OPENAI_FT_NEWS_MODEL |
+| `gpt_ft_result.json` | Optional future L2 fine-tune (not wired by default) |
 
 After embedding fine-tuning, rebuild ChromaDB:
 ```bash
@@ -104,7 +122,8 @@ python scripts/build_rag_collections.py --flush
 | Missing | Behavior |
 |---------|----------|
 | DistilBERT model | Signal 2 skipped, judge uses rules + LLM |
-| OPENAI_API_KEY | Signals 3 + Judge skipped, L2/L3/L7 use fallbacks |
+| OPENAI_API_KEY | Signals 3 + Judge skipped, L2/L3 use rule-based fallbacks |
+| SQLite ingestion rows | L3 falls back to live Open-Meteo; L2 uses RAG + FALLBACK_PARAMS only |
 | Fine-tuned embedder | Base all-MiniLM-L6-v2 for Stage 1 |
 | Cross-encoder | Bi-encoder distance sort for Stage 2 |
 
@@ -113,6 +132,7 @@ python scripts/build_rag_collections.py --flush
 ```bash
 python -m pytest tests/test_risk_classifier_agent.py -v
 python -m pytest tests/test_llm_agents.py -v
+python -m pytest tests/test_news_weather_agents_v2.py -v
 python -m pytest tests/test_ensemble_signals.py -v
 python evaluation/qa_04_replay_mode_real_data.py
 python evaluation/qa_05_live_mode_taiwan_earthquake.py

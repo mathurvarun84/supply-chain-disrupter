@@ -50,9 +50,12 @@ def test_news_agent_fallback_on_llm_error():
         ),
         active_record={"order_region": "Eastern Asia", "year": 2022},
     )
-    with patch("src.agents.news_agent.call_openai_structured", side_effect=RuntimeError("rate limit")):
-        with patch("src.agents.news_agent.build_news_signals", return_value=[]):
-            result = news_event_analysis_agent(state)
+    with patch("src.agents.news_agent.agent.call_openai_structured", side_effect=RuntimeError("rate limit")):
+        with patch("src.agents.news_agent.agent.build_news_signals", return_value=[]):
+            with patch("src.agents.news_agent.agent.fetch_recent_news", return_value=[]):
+                with patch("src.agents.news_agent.agent.build_rag_context", return_value=""):
+                    with patch("src.agents.news_agent.agent.execute_query", return_value=[]):
+                        result = news_event_analysis_agent(state)
     assert len(result["news_signals"]) >= 1
     assert result["news_analysis_llm"] is None
     assert result["news_signals"][0].expected_duration_days is not None
@@ -83,11 +86,12 @@ def test_weather_llm_overrides_numeric_severity():
         supply_chain_narrative="Test narrative",
         rag_escalation_warranted=True,
     )
-    with patch("src.agents.weather_agent.fetch_open_meteo", return_value={"hourly": {"windspeed_10m": [10], "precipitation": [1], "weathercode": [95]}}):
-        with patch("src.agents.weather_agent.compute_weather_severity", return_value=0.5):
-            with patch("src.agents.weather_agent.has_openai_api_key", return_value=True):
-                with patch("src.agents.weather_agent.call_openai_structured", return_value=mock_output):
-                    result = weather_risk_monitoring_agent(state)
+    with patch("src.agents.weather_agent.agent.fetch_latest_weather_signal", return_value=None):
+        with patch("src.agents.weather_agent.agent.fetch_open_meteo", return_value={"hourly": {"windspeed_10m": [10], "precipitation": [1], "weathercode": [95]}}):
+            with patch("src.agents.weather_agent.agent.compute_weather_severity", return_value=0.5):
+                with patch("src.agents.weather_agent.agent.has_openai_api_key", return_value=True):
+                    with patch("src.agents.weather_agent.agent.call_openai_structured", return_value=mock_output):
+                        result = weather_risk_monitoring_agent(state)
     assert result["live_weather_severity"] == 0.91
 
 
