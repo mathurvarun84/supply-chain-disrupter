@@ -20,8 +20,8 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 from src.agents.distilbert_signal import run_distilbert_inference
-from src.agents.judge_agent import run_judge
-from src.agents.llm_signal import run_llm_signal
+from src.agents.risk_classifier_agent.judge_agent import run_judge
+from src.agents.risk_classifier_agent.llm_signal import run_llm_signal
 from src.agents.state import GlobalState, RiskClassificationResult, RuleBasedSignal
 from src.utils.db_utils import (
     ensure_risk_classification_table,

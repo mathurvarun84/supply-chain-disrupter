@@ -123,10 +123,10 @@ def test_risk_classifier_llm_enhancement_non_blocking():
         news_signals=[],
         live_weather_severity=0.5,
     )
-    with patch("src.agents.risk_classifier_agent.run_llm_signal", return_value=None):
-        with patch("src.agents.risk_classifier_agent.run_judge", return_value=None):
-            with patch("src.agents.risk_classifier_agent.insert_risk_classification"):
-                with patch("src.agents.risk_classifier_agent.ensure_risk_classification_table"):
+    with patch("src.agents.risk_classifier_agent.agent.run_llm_signal", return_value=None):
+        with patch("src.agents.risk_classifier_agent.agent.run_judge", return_value=None):
+            with patch("src.agents.risk_classifier_agent.agent.insert_risk_classification"):
+                with patch("src.agents.risk_classifier_agent.agent.ensure_risk_classification_table"):
                     result = risk_classifier_agent(state)
     rc = result["risk_classification"]
     assert rc is not None
@@ -169,18 +169,18 @@ def test_canceled_shipment_floor_when_llm_disagrees():
         confidence_level="medium",
         primary_driver="supply",
     )
-    with patch("src.agents.risk_classifier_agent.run_llm_signal", return_value=llm_wrong):
-        with patch("src.agents.risk_classifier_agent.run_judge", return_value=None):
-            with patch("src.agents.risk_classifier_agent.run_distilbert_inference") as mock_db:
+    with patch("src.agents.risk_classifier_agent.agent.run_llm_signal", return_value=llm_wrong):
+        with patch("src.agents.risk_classifier_agent.agent.run_judge", return_value=None):
+            with patch("src.agents.risk_classifier_agent.agent.run_distilbert_inference") as mock_db:
                 from src.agents.state import DistilBERTSignal
                 mock_db.return_value = DistilBERTSignal(
                     predicted_label="N/A", confidence=0.0,
                     probability_distribution={"LOW": 0.0, "MEDIUM": 0.0, "HIGH": 0.0, "CRITICAL": 0.0},
                     model_source="skipped", inference_ms=0.0,
                 )
-                with patch("src.agents.risk_classifier_agent.insert_risk_classification"):
-                    with patch("src.agents.risk_classifier_agent.ensure_risk_classification_table"):
-                        with patch("src.agents.risk_classifier_agent._get_norm_bounds") as mock_bounds:
+                with patch("src.agents.risk_classifier_agent.agent.insert_risk_classification"):
+                    with patch("src.agents.risk_classifier_agent.agent.ensure_risk_classification_table"):
+                        with patch("src.agents.risk_classifier_agent.agent._get_norm_bounds") as mock_bounds:
                             mock_bounds.return_value = {
                                 "weather_severity_hub": (1.18, 10.0),
                                 "natural_disaster_risk": (1.18, 10.0),
@@ -188,7 +188,7 @@ def test_canceled_shipment_floor_when_llm_disagrees():
                                 "defect_rate_pct": (2.0, 19.82),
                                 "disruption_news_count": (0.0, 17.0),
                             }
-                            with patch("src.agents.risk_classifier_agent.query_chroma_rag", return_value=[]):
+                            with patch("src.agents.risk_classifier_agent.agent.query_chroma_rag", return_value=[]):
                                 result = risk_classifier_agent(state)
     rc = result["risk_classification"]
     assert rc.final_label == "CRITICAL"
