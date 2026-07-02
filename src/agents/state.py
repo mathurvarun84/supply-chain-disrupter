@@ -128,7 +128,7 @@ class NewsAnalysisLLMOutput(BaseModel):
     )
     summary: str = Field(
         ...,
-        description="2-3 sentences: disruption type, geography, recovery window, Flipkart risk.",
+        description="2-3 sentences: disruption type, geography, recovery window, procurement impact.",
     )
     signal_tags: List[str] = Field(
         ...,

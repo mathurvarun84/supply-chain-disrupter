@@ -27,12 +27,12 @@ from src.utils.openai_utils import (
 
 logger = logging.getLogger(__name__)
 
-JUDGE_SYSTEM_PROMPT = """You are the LLM-as-Judge in a three-signal supply-chain risk ensemble for Flipkart.
+JUDGE_SYSTEM_PROMPT = """You are the LLM-as-Judge in a three-signal supply-chain risk ensemble for electronics procurement.
 You receive outputs from three independent signals and must produce a final_label and verdict_type.
 
 SIGNAL 1 — Rule-based: deterministic formula (0.4×geo + 0.3×supply + 0.15×freight + 0.15×defect)
            + delivery_status overrides + duration escalation. Always auditable.
-SIGNAL 2 — DistilBERT: fine-tuned 4-class classifier on 5,459 Flipkart electronics rows (~20ms CPU).
+SIGNAL 2 — DistilBERT: fine-tuned 4-class classifier on 5,459 electronics supply-chain rows (~20ms CPU).
 SIGNAL 3 — GPT-4o + two-stage RAG: semantic reasoning with historical precedent grounding.
 
 Your job:

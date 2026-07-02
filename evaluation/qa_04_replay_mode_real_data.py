@@ -131,11 +131,11 @@ state = GlobalState(
 # update_risk_label is patched AND tracked — it must never be called in replay.
 # query_chroma_rag is patched because ChromaDB may not be populated in CI.
 # ---------------------------------------------------------------------------
-with patch("src.agents.risk_classifier_agent.insert_risk_classification"):
-    with patch("src.agents.risk_classifier_agent.update_risk_label") as mock_update:
-        with patch("src.agents.risk_classifier_agent.query_chroma_rag", return_value=[]):
-            with patch("src.agents.risk_classifier_agent.run_llm_signal", return_value=None):
-                with patch("src.agents.risk_classifier_agent.run_judge", return_value=None):
+with patch("src.agents.risk_classifier_agent.agent.insert_risk_classification"):
+    with patch("src.agents.risk_classifier_agent.agent.update_risk_label") as mock_update:
+        with patch("src.agents.risk_classifier_agent.agent.query_chroma_rag", return_value=[]):
+            with patch("src.agents.risk_classifier_agent.agent.run_llm_signal", return_value=None):
+                with patch("src.agents.risk_classifier_agent.agent.run_judge", return_value=None):
                     result = risk_classifier_agent(state)
 
 rc = result["risk_classification"]

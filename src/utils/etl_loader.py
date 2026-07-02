@@ -13,6 +13,18 @@ from src.utils.db_utils import DB_PATH
 
 
 EXCEL_SOURCE = Path("data/raw/supply_chain_lite_master.xlsx")
+EXPECTED_LITE_MASTER_ROWS = 11_559
+
+# Observed min/max in supply_chain_lite_master.xlsx v3.1 (32-col Lite Master).
+# QA-08b and risk-classifier fallbacks use these when SQLite returns NULL extrema.
+SPEC_NORM_BOUNDS: Dict[str, tuple[float, float]] = {
+    "weather_severity_hub":    (1.18, 10.0),
+    "natural_disaster_risk":   (1.18, 10.0),
+    "supply_disruption_index": (4.09, 9.97),
+    "defect_rate_pct":         (2.0,  19.82),
+    "disruption_news_count":   (0.0,  22.0),
+}
+
 EXPECTED_SHEETS = {
     "Lite Master",
     "Column Guide (Lite)",
@@ -123,7 +135,7 @@ def _validate_varun_dataset(sheets: Dict[str, pd.DataFrame]) -> None:
     if len(master) < 5459:
         raise ValueError(
             f"Lite Master row count {len(master):,} is below minimum 5,459. "
-            "Expected 11,559 rows in supply_chain_lite_master.xlsx. "
+            f"Expected {EXPECTED_LITE_MASTER_ROWS:,} rows in supply_chain_lite_master.xlsx. "
             "Ensure the v3.1 workbook (32 cols) is loaded."
         )
 

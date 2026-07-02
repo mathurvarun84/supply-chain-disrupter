@@ -59,6 +59,12 @@ def _get_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set. Add to .env.")
+    from src.utils.hf_utils import insecure_ssl_enabled
+
+    if insecure_ssl_enabled():
+        import httpx
+
+        return OpenAI(api_key=api_key, http_client=httpx.Client(verify=False))
     return OpenAI(api_key=api_key)
 
 
@@ -212,4 +218,5 @@ def format_semiconductor_signals(rows: list) -> str:
 
 def has_openai_api_key() -> bool:
     """Return True when OPENAI_API_KEY is set in the environment."""
+    _load_project_env()
     return bool(os.getenv("OPENAI_API_KEY"))

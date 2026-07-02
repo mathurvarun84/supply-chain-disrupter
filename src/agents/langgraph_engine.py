@@ -7,7 +7,7 @@ from src.utils.yaml_utils import get_route_map
 from src.agents.data_ingestion.agent import data_ingestion_agent
 from src.agents.weather_agent.agent import weather_risk_monitoring_agent
 from src.agents.news_agent.agent import news_event_analysis_agent
-from src.agents.risk_classifier_agent import risk_classifier_agent
+from src.agents.risk_classifier_agent.agent import risk_classifier_agent
 from src.agents.mitigation_agent import mitigation_recommendation_agent
 from src.agents.state import ForecastResult, GlobalState, SimulationResult
 

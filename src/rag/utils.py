@@ -1,3 +1,29 @@
+"""
+utils.py — Monolithic RAG corpus builder for Capstone Project 8.
+
+This module builds a single ChromaDB collection (`electronics_supply_chain_knowledge`)
+from structured Excel data, mitigation playbooks, and static PDF/DOCX reports.
+
+INGESTION (bi-encoder)
+----------------------
+Each text chunk is embedded with a sentence-transformers *bi-encoder* (fine-tuned
+`mathurvarun84/supply-chain-embeddings` from Hugging Face by default; override via
+`EMBEDDING_MODEL_PATH`).
+ChromaDB's SentenceTransformerEmbeddingFunction encodes query and document texts
+*independently* into 384-dim vectors. During `collection.upsert()`, ChromaDB calls
+the embedding function internally — callers pass raw text, not vectors.
+
+RETRIEVAL vs RERANKING
+----------------------
+`query_chroma_rag()` performs Stage-1 bi-encoder retrieval only (cosine distance
+over the HNSW index). Stage-2 cross-encoder reranking lives in `src/rag/retriever.py`
+(`retrieve_and_rerank`, `rerank_results`) and is used by LangGraph agents for the
+named collections in `src/rag/collections.py`.
+
+See also: `src/rag/collections.py` for domain-specific collections (historical
+precedents, export control, India sourcing).
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +41,7 @@ from docx import Document as DocxDocument
 from pypdf import PdfReader
 
 from src.utils.etl_loader import EXCEL_SOURCE, read_excel_sheets
+from src.utils.hf_utils import configure_hf_hub_ssl
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHROMA_DIR = PROJECT_ROOT / "outputs" / "chromadb"
@@ -22,7 +49,7 @@ DEFAULT_COLLECTION_NAME = "electronics_supply_chain_knowledge"
 PLAYBOOKS_DIR = PROJECT_ROOT / "config" / "playbooks"
 STATIC_CONTEXT_DIR = PROJECT_ROOT / "data" / "raw" / "RAG_data"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-FINETUNED_EMBEDDING_MODEL = PROJECT_ROOT / "fine_tuning" / "models" / "supply_chain_embeddings"
+DEFAULT_EMBEDDING_REPO = "mathurvarun84/supply-chain-embeddings"
 CHUNK_SIZE = 1000
 logger = logging.getLogger(__name__)
 CHUNK_OVERLAP = 200
@@ -31,8 +58,25 @@ _EMBEDDING_WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
 
 
 def _embedding_weights_present(model_dir: Path) -> bool:
-    """True when a local embedding directory contains loadable model weights."""
-    return model_dir.is_dir() and any((model_dir / name).exists() for name in _EMBEDDING_WEIGHT_FILES)
+    """
+    True when a local directory is a loadable sentence-transformers export.
+
+    Weight files alone are insufficient — ST needs modules.json (or a HF
+    config.json) so the loader does not mis-detect the path and fail with
+    errors like ``No module named 'sentence_transformers.base'``.
+    """
+    if not model_dir.is_dir():
+        return False
+    has_weights = any((model_dir / name).exists() for name in _EMBEDDING_WEIGHT_FILES)
+    if not has_weights:
+        return False
+    if (model_dir / "modules.json").is_file():
+        return True
+    if (model_dir / "config_sentence_transformers.json").is_file():
+        return True
+    if (model_dir / "config.json").is_file():
+        return True
+    return False
 
 # Module-level singleton — ChromaDB PersistentClient holds an exclusive file lock
 # on chroma.sqlite3. Creating multiple instances in the same process causes WinError 32
@@ -42,6 +86,12 @@ _chroma_lock = threading.Lock()
 
 
 def get_chroma_client() -> chromadb.PersistentClient:
+    """
+    Return a process-wide singleton ChromaDB PersistentClient.
+
+    ChromaDB locks `chroma.sqlite3` exclusively; reusing one client avoids
+    WinError 32 on Windows when multiple callers open the same store.
+    """
     global _chroma_client
     with _chroma_lock:
         if _chroma_client is None:
@@ -59,53 +109,59 @@ def reset_chroma_client() -> None:
 
 def resolve_embedding_model_name() -> str:
     """
-    Resolve the sentence-transformers model id or local path for embeddings.
+    Resolve the Hugging Face repo id for the sentence-transformers bi-encoder.
 
     Priority:
-      1. EMBEDDING_MODEL_PATH env var (local directory or Hugging Face repo id)
-      2. fine_tuning/models/supply_chain_embeddings/ (Phase A output)
-      3. EMBEDDING_MODEL constant (base model)
+      1. EMBEDDING_MODEL_PATH env var (Hugging Face repo id)
+      2. DEFAULT_EMBEDDING_REPO (project fine-tuned model on Hugging Face Hub)
     """
     custom = os.getenv("EMBEDDING_MODEL_PATH", "").strip()
     if custom:
-        custom_path = Path(custom)
-        if custom_path.exists():
-            if _embedding_weights_present(custom_path):
-                logger.info("Using custom embedding model (local): %s", custom)
-                return str(custom_path)
-            logger.warning(
-                "EMBEDDING_MODEL_PATH %s exists but has no model weights — "
-                "falling back to base model %s",
-                custom,
-                EMBEDDING_MODEL,
-            )
-        else:
-            # Hugging Face repo ids (org/model) are not local paths — pass through.
-            logger.info("Using custom embedding model: %s", custom)
-            return custom
-    if _embedding_weights_present(FINETUNED_EMBEDDING_MODEL):
-        model_name = str(FINETUNED_EMBEDDING_MODEL)
-        logger.info("Using fine-tuned embedding model (Phase A output): %s", model_name)
-        return model_name
-    if FINETUNED_EMBEDDING_MODEL.exists():
-        logger.info(
-            "Fine-tuned embedding dir present but no weights (Colab/git clone) — "
-            "using base model: %s",
-            EMBEDDING_MODEL,
-        )
-    logger.info("Using base embedding model (fine-tuned model not found): %s", EMBEDDING_MODEL)
-    return EMBEDDING_MODEL
+        logger.info("Using embedding model from Hugging Face: %s", custom)
+        return custom
+    logger.info("Using default fine-tuned embedding model: %s", DEFAULT_EMBEDDING_REPO)
+    return DEFAULT_EMBEDDING_REPO
 
 
 def get_embedding_model() -> SentenceTransformerEmbeddingFunction:
-    """Return SentenceTransformerEmbeddingFunction for the resolved model."""
-    return SentenceTransformerEmbeddingFunction(
-        model_name=resolve_embedding_model_name(),
-        normalize_embeddings=True,
-    )
+    """
+    Return the ChromaDB embedding function wrapping the resolved bi-encoder.
+
+    The bi-encoder encodes each chunk and query into a fixed 384-dim vector
+    with L2-normalization (`normalize_embeddings=True`) so cosine distance in
+    ChromaDB matches semantic similarity. Used at ingest (upsert) and query time.
+    """
+    configure_hf_hub_ssl()
+    model_name = resolve_embedding_model_name()
+    try:
+        return SentenceTransformerEmbeddingFunction(
+            model_name=model_name,
+            normalize_embeddings=True,
+        )
+    except Exception as exc:
+        if model_name == EMBEDDING_MODEL:
+            raise
+        logger.warning(
+            "Embedding model %s failed to load (%s) — falling back to %s",
+            model_name,
+            exc,
+            EMBEDDING_MODEL,
+        )
+        return SentenceTransformerEmbeddingFunction(
+            model_name=EMBEDDING_MODEL,
+            normalize_embeddings=True,
+        )
 
 
 def _chunk_text(text: str) -> List[str]:
+    """
+    Split long text into overlapping character windows for embedding.
+
+    Prefers breaks at paragraph, newline, or sentence boundaries within the
+    second half of each window so chunks stay near CHUNK_SIZE without cutting
+    mid-sentence when possible. Overlap (CHUNK_OVERLAP) keeps context that
+    straddles a boundary visible in at least one chunk.
+    """
     text = re.sub(r"\r\n?", "\n", text).strip()
     if not text:
         return []
@@ -134,6 +190,7 @@ def _chunk_text(text: str) -> List[str]:
 
 
 def _doc_id(source: str, doc_type: str, key: str, chunk_index: int) -> str:
+    """Build a stable SHA-256 ID so upserts overwrite the same chunk on rebuild."""
     value = f"{source}|{doc_type}|{key}|{chunk_index}".encode("utf-8")
     return hashlib.sha256(value).hexdigest()
 
@@ -149,6 +206,12 @@ def _add_document(
     key: str,
     metadata: Dict[str, Any] | None = None,
 ) -> None:
+    """
+    Chunk `text` and append (document, metadata, id) triples to the batch lists.
+
+    Each chunk gets standard metadata (source, type, domain) plus optional
+    caller fields. Actual bi-encoder embedding happens later in upsert().
+    """
     for index, chunk in enumerate(_chunk_text(text)):
         documents.append(chunk)
         metadatas.append(
@@ -168,6 +231,13 @@ def _add_document(
 def _workbook_documents(
     excel_path: Path,
 ) -> tuple[List[str], List[Dict[str, Any]], List[str], Dict[str, int]]:
+    """
+    Extract RAG documents from the Lite Master Excel workbook.
+
+    Produces five doc types: data dictionary rows, legend entries, aggregated
+    disruption event profiles, mitigation recommendations, and semiconductor
+    signal events. Returns parallel lists ready for Chroma upsert.
+    """
     sheets = read_excel_sheets(excel_path)
     documents: List[str] = []
     metadatas: List[Dict[str, Any]] = []
@@ -349,6 +419,12 @@ def _workbook_documents(
 def _playbook_documents(
     playbooks_dir: Path,
 ) -> tuple[List[str], List[Dict[str, Any]], List[str], int]:
+    """
+    Load mitigation playbook `.txt` files from config/playbooks into chunk lists.
+
+    Each file becomes one or more chunks via `_add_document`. Returns the
+    playbook file count for build statistics.
+    """
     documents: List[str] = []
     metadatas: List[Dict[str, Any]] = []
     ids: List[str] = []
@@ -373,6 +449,7 @@ def _playbook_documents(
 
 
 def _docx_text(path: Path) -> str:
+    """Extract plain text from a DOCX file, including pipe-delimited table rows."""
     document = DocxDocument(path)
     sections: List[str] = []
 
@@ -399,6 +476,12 @@ def _docx_text(path: Path) -> str:
 def _static_context_documents(
     context_dir: Path,
 ) -> tuple[List[str], List[Dict[str, Any]], List[str], Dict[str, int]]:
+    """
+    Ingest static PDF and DOCX reports from data/raw/RAG_data (root level).
+
+    PDFs are chunked per page; DOCX files are chunked as whole documents.
+    Skips empty extractions and returns counts by file type.
+    """
     documents: List[str] = []
     metadatas: List[Dict[str, Any]] = []
     ids: List[str] = []
@@ -463,10 +546,12 @@ def _static_context_documents(
 
 
 def build_chroma_from_default_excel(flush_existing: bool = False) -> Dict[str, Any]:
+    """Build the monolithic collection from the default Excel path (incremental-friendly)."""
     return build_chroma_complete(flush_existing=flush_existing)
 
 
 def build_rag_corpus_complete(flush_existing: bool = True) -> Dict[str, Any]:
+    """Alias for a full corpus rebuild; defaults to flushing the existing collection."""
     return build_chroma_complete(flush_existing=flush_existing)
 
 
@@ -476,7 +561,22 @@ def build_chroma_complete(
     playbooks_dir: Path = PLAYBOOKS_DIR,
     static_context_dir: Path = STATIC_CONTEXT_DIR,
 ) -> Dict[str, Any]:
-    """Build one electronics semantic store from all committed static sources."""
+    """
+    Build the monolithic `electronics_supply_chain_knowledge` ChromaDB collection.
+
+    Pipeline: Excel + playbooks + static files → chunk → bi-encoder embed → upsert.
+    ChromaDB calls `get_embedding_model()` on each upsert batch; the bi-encoder
+    converts chunk text to 384-dim vectors stored in the HNSW cosine index.
+
+    Args:
+        flush_existing: Delete the collection before rebuild when True.
+        excel_path: Path to the Lite Master workbook.
+        playbooks_dir: Directory of mitigation `.txt` playbooks.
+        static_context_dir: Directory of supplemental PDF/DOCX reports.
+
+    Returns:
+        Summary dict with chunk counts, source breakdown, and embedding model used.
+    """
     if flush_existing:
         # Drop the collection via the API rather than deleting the directory.
         # shutil.rmtree on a live PersistentClient causes WinError 32 on Windows
@@ -562,6 +662,23 @@ def query_chroma_rag(
     collection_name: str = DEFAULT_COLLECTION_NAME,
     where: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
+    """
+    Stage-1 bi-encoder retrieval against the monolithic collection.
+
+    Embeds `query` with the same bi-encoder used at ingest, then returns the
+    top-N chunks by ascending cosine distance (lower = more similar). Does not
+    run cross-encoder reranking; agents needing higher precision should use
+    `src.rag.retriever.retrieve_and_rerank` on named collections instead.
+
+    Args:
+        query: Natural-language search string.
+        n_results: Maximum hits to return (capped at collection size).
+        collection_name: Chroma collection name (default monolithic store).
+        where: Optional Chroma metadata filter.
+
+    Returns:
+        List of dicts with keys `text`, `metadata`, and `distance`.
+    """
     client = get_chroma_client()
     try:
         collection = client.get_collection(

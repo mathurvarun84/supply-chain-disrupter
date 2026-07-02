@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _EXPORT_CONTROL_TOP_QUARTILE = 5.40
 
-LLM_SIGNAL_SYSTEM_PROMPT = """You are a senior supply-chain risk analyst for Flipkart electronics procurement.
+LLM_SIGNAL_SYSTEM_PROMPT = """You are a senior supply-chain risk analyst for electronics procurement.
 You are Signal 3 in a three-signal ensemble. You receive rule-based classification results,
 SQLite record data, semiconductor signals, and two-stage RAG context (bi-encoder + cross-encoder reranked).
 

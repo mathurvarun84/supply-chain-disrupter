@@ -26,7 +26,7 @@ BOUNDS: Dict[str, Tuple[float, float]] = {
     "natural_disaster_risk":   (1.18, 10.0),
     "supply_disruption_index": (4.09, 9.97),
     "defect_rate_pct":         (2.0,  19.82),
-    "disruption_news_count":   (0.0,  17.0),
+    "disruption_news_count":   (0.0,  22.0),
     "derived_weather_severity": (0.0, 1.0),
     "severity_score":          (0.0,  1.0),
     "normalized_sdi":          (4.09, 9.97),

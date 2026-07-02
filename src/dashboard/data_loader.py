@@ -44,7 +44,21 @@ def show_data_loader() -> None:
                     st.success("RAG corpus built")
                     st.json(results)
                 except Exception as exc:
-                    st.error(f"ChromaDB build failed: {exc}")
+                    hint = ""
+                    err = str(exc)
+                    if "SSL" in err or "CERTIFICATE" in err:
+                        hint = (
+                            " Hugging Face download blocked by TLS — set "
+                            "HF_INSECURE_SSL=1 and restart Streamlit, or "
+                            "run the build once from a terminal with network access."
+                        )
+                    elif "sentence_transformers" in err:
+                        hint = (
+                            " Upgrade sentence-transformers (>=5.5.1) and set "
+                            "EMBEDDING_MODEL_PATH to the Hugging Face repo "
+                            "(default: mathurvarun84/supply-chain-embeddings)."
+                        )
+                    st.error(f"ChromaDB build failed: {exc}.{hint}")
 
     st.markdown("---")
     st.subheader("Data Summary")

@@ -28,6 +28,7 @@ from transformers import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fine_tuning.generate_training_data import ID2LABEL, LABEL2ID, load_distilbert_data
+from src.utils.hf_utils import distilbert_model_inputs, from_pretrained_kwargs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -201,11 +202,19 @@ def predict_label(texts: list, model_path: str | None = None) -> list:
     Used by evaluate_all.py and available for manual testing.
     """
     path = model_path or str(MODEL_OUTPUT)
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    model = AutoModelForSequenceClassification.from_pretrained(path)
+    load_kw = from_pretrained_kwargs(path)
+    tokenizer = AutoTokenizer.from_pretrained(path, **load_kw)
+    model = AutoModelForSequenceClassification.from_pretrained(path, **load_kw)
     model.eval()
 
-    inputs = tokenizer(texts, truncation=True, max_length=MAX_LENGTH, padding=True, return_tensors="pt")
+    encoded = tokenizer(
+        texts,
+        truncation=True,
+        max_length=MAX_LENGTH,
+        padding=True,
+        return_tensors="pt",
+    )
+    inputs = distilbert_model_inputs(encoded)
     with torch.no_grad():
         logits = model(**inputs).logits
     predictions = torch.argmax(logits, dim=-1).tolist()

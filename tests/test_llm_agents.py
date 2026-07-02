@@ -50,9 +50,12 @@ def test_news_agent_fallback_on_llm_error():
         ),
         active_record={"order_region": "Eastern Asia", "year": 2022},
     )
-    with patch("src.agents.news_agent.call_openai_structured", side_effect=RuntimeError("rate limit")):
-        with patch("src.agents.news_agent.build_news_signals", return_value=[]):
-            result = news_event_analysis_agent(state)
+    with patch("src.agents.news_agent.agent.call_openai_structured", side_effect=RuntimeError("rate limit")):
+        with patch("src.agents.news_agent.agent.build_news_signals", return_value=[]):
+            with patch("src.agents.news_agent.agent.fetch_recent_news", return_value=[]):
+                with patch("src.agents.news_agent.agent.build_rag_context", return_value=""):
+                    with patch("src.agents.news_agent.agent.execute_query", return_value=[]):
+                        result = news_event_analysis_agent(state)
     assert len(result["news_signals"]) >= 1
     assert result["news_analysis_llm"] is None
     assert result["news_signals"][0].expected_duration_days is not None
@@ -83,11 +86,12 @@ def test_weather_llm_overrides_numeric_severity():
         supply_chain_narrative="Test narrative",
         rag_escalation_warranted=True,
     )
-    with patch("src.agents.weather_agent.fetch_open_meteo", return_value={"hourly": {"windspeed_10m": [10], "precipitation": [1], "weathercode": [95]}}):
-        with patch("src.agents.weather_agent.compute_weather_severity", return_value=0.5):
-            with patch("src.agents.weather_agent.has_openai_api_key", return_value=True):
-                with patch("src.agents.weather_agent.call_openai_structured", return_value=mock_output):
-                    result = weather_risk_monitoring_agent(state)
+    with patch("src.agents.weather_agent.agent.fetch_latest_weather_signal", return_value=None):
+        with patch("src.agents.weather_agent.agent.fetch_open_meteo", return_value={"hourly": {"windspeed_10m": [10], "precipitation": [1], "weathercode": [95]}}):
+            with patch("src.agents.weather_agent.agent.compute_weather_severity", return_value=0.5):
+                with patch("src.agents.weather_agent.agent.has_openai_api_key", return_value=True):
+                    with patch("src.agents.weather_agent.agent.call_openai_structured", return_value=mock_output):
+                        result = weather_risk_monitoring_agent(state)
     assert result["live_weather_severity"] == 0.91
 
 
@@ -119,10 +123,10 @@ def test_risk_classifier_llm_enhancement_non_blocking():
         news_signals=[],
         live_weather_severity=0.5,
     )
-    with patch("src.agents.risk_classifier_agent.run_llm_signal", return_value=None):
-        with patch("src.agents.risk_classifier_agent.run_judge", return_value=None):
-            with patch("src.agents.risk_classifier_agent.insert_risk_classification"):
-                with patch("src.agents.risk_classifier_agent.ensure_risk_classification_table"):
+    with patch("src.agents.risk_classifier_agent.agent.run_llm_signal", return_value=None):
+        with patch("src.agents.risk_classifier_agent.agent.run_judge", return_value=None):
+            with patch("src.agents.risk_classifier_agent.agent.insert_risk_classification"):
+                with patch("src.agents.risk_classifier_agent.agent.ensure_risk_classification_table"):
                     result = risk_classifier_agent(state)
     rc = result["risk_classification"]
     assert rc is not None
@@ -165,18 +169,18 @@ def test_canceled_shipment_floor_when_llm_disagrees():
         confidence_level="medium",
         primary_driver="supply",
     )
-    with patch("src.agents.risk_classifier_agent.run_llm_signal", return_value=llm_wrong):
-        with patch("src.agents.risk_classifier_agent.run_judge", return_value=None):
-            with patch("src.agents.risk_classifier_agent.run_distilbert_inference") as mock_db:
+    with patch("src.agents.risk_classifier_agent.agent.run_llm_signal", return_value=llm_wrong):
+        with patch("src.agents.risk_classifier_agent.agent.run_judge", return_value=None):
+            with patch("src.agents.risk_classifier_agent.agent.run_distilbert_inference") as mock_db:
                 from src.agents.state import DistilBERTSignal
                 mock_db.return_value = DistilBERTSignal(
                     predicted_label="N/A", confidence=0.0,
                     probability_distribution={"LOW": 0.0, "MEDIUM": 0.0, "HIGH": 0.0, "CRITICAL": 0.0},
                     model_source="skipped", inference_ms=0.0,
                 )
-                with patch("src.agents.risk_classifier_agent.insert_risk_classification"):
-                    with patch("src.agents.risk_classifier_agent.ensure_risk_classification_table"):
-                        with patch("src.agents.risk_classifier_agent._get_norm_bounds") as mock_bounds:
+                with patch("src.agents.risk_classifier_agent.agent.insert_risk_classification"):
+                    with patch("src.agents.risk_classifier_agent.agent.ensure_risk_classification_table"):
+                        with patch("src.agents.risk_classifier_agent.agent._get_norm_bounds") as mock_bounds:
                             mock_bounds.return_value = {
                                 "weather_severity_hub": (1.18, 10.0),
                                 "natural_disaster_risk": (1.18, 10.0),
@@ -184,15 +188,15 @@ def test_canceled_shipment_floor_when_llm_disagrees():
                                 "defect_rate_pct": (2.0, 19.82),
                                 "disruption_news_count": (0.0, 17.0),
                             }
-                            with patch("src.agents.risk_classifier_agent.query_chroma_rag", return_value=[]):
+                            with patch("src.agents.risk_classifier_agent.agent.query_chroma_rag", return_value=[]):
                                 result = risk_classifier_agent(state)
     rc = result["risk_classification"]
     assert rc.final_label == "CRITICAL"
     assert rc.critical_flag is True
 
 
-def test_mitigation_agent_llm_path():
-    """Mitigation agent produces structured action when LLM succeeds."""
+def test_mitigation_agent_rule_based():
+    """Mitigation agent produces rule-based actions from risk classification."""
     from src.agents.mitigation_agent import mitigation_recommendation_agent
 
     risk = RiskClassificationResult(
@@ -209,23 +213,12 @@ def test_mitigation_agent_llm_path():
         active_record={"event_date": "2024-01-01", "port": "Rotterdam", "sku": "CHIP_AP"},
         risk_classification=risk,
     )
-    mock_output = MitigationLLMOutput(
-        summary="HIGH risk test",
-        ranked_actions=["[ROUTING] test", "[INVENTORY] test", "[SOURCING] test"],
-        cost_estimate="MEDIUM: test",
-        urgency="HIGH",
-        rag_citations=["Source: test — relevance"],
-        india_sourcing_recommendations=["Dixon Technologies — test"],
-    )
-    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.call_openai_structured", return_value=mock_output):
-            with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=""):
-                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
-                    result = mitigation_recommendation_agent(state)
+    with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+        result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
-    assert action.summary == "HIGH risk test"
+    assert "HIGH" in action.summary
     assert len(action.recommendations) == 3
-    assert action.urgency == "HIGH"
+    assert "stockout" in action.recommendations[0].lower()
 
 
 def test_pydantic_schemas_are_flat():
