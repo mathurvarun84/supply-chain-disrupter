@@ -29,6 +29,20 @@ At query time, the query string is embedded the same way, and ChromaDB
 computes cosine distance between the query vector and every stored vector,
 returning the top-N closest chunks.
 
+TWO-STAGE RETRIEVAL (query time — see src/rag/retriever.py)
+------------------------------------------------------------
+Functions in this module (`query_collection`, `query_multi_collection`) perform
+Stage 1 only: bi-encoder recall via cosine distance. LangGraph agents use
+`retriever.retrieve_and_rerank` for Stage 2:
+
+  Stage 1 (bi-encoder): Pull top-N candidates per collection — fast but each
+                          text is encoded independently of the query.
+  Stage 2 (cross-encoder): Score (query, chunk) pairs jointly with full attention
+                           (ms-marco-MiniLM-L-6-v2), re-sort by relevance, keep top-K.
+
+If the cross-encoder is unavailable, Stage 2 falls back to sorting by bi-encoder
+distance from Stage 1.
+
 DISTANCE METRIC
 ---------------
 All three collections use "cosine" space (hnsw:space = "cosine") with
@@ -101,8 +115,6 @@ RAG_DATA_ROOT = PROJECT_ROOT / "data" / "raw" / "RAG_data"
 # Where ChromaDB persists its SQLite + HNSW index files (shared with src.rag.utils)
 from src.rag.utils import (
     CHROMA_DIR,
-    EMBEDDING_MODEL,
-    FINETUNED_EMBEDDING_MODEL,
     get_chroma_client,
     get_embedding_model,
     reset_chroma_client,
@@ -436,16 +448,16 @@ def build_collection(
     chunk_cfg: Dict[str, int],
 ) -> Dict[str, Any]:
     """
-    Ingest all .txt / .pdf / .docx files from `source_dir` into a named
-    ChromaDB collection, returning a summary dict.
+    Ingest all .txt / .pdf / .docx files from `source_dir` into a named collection.
 
-    ChromaDB's upsert() is idempotent: running this function twice on the
-    same files is safe — existing chunks are overwritten, not duplicated,
-    because we use deterministic SHA-256 IDs.
+    Bi-encoder ingest pipeline (per file):
+      LOAD  → read raw text from disk
+      CHUNK → split into overlapping windows (size/overlap from chunk_cfg)
+      EMBED → ChromaDB calls embedding_fn (MiniLM bi-encoder) inside upsert()
+      UPSERT→ store (id, text, 384-dim vector, metadata) in HNSW cosine index
 
-    Internally, ChromaDB stores each chunk as a triple:
-        (id: str,  document: str,  embedding: List[float])
-    Metadata is stored separately in a SQLite table within the ChromaDB dir.
+    ChromaDB's upsert() is idempotent: re-running on the same files overwrites
+    existing chunks (deterministic SHA-256 IDs), never duplicates.
 
     Args:
         collection_name: One of the names defined in COLLECTION_NAMES.
@@ -580,13 +592,17 @@ def query_collection(
     where: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Query a single named ChromaDB collection and return the top-N chunks.
+    Stage-1 bi-encoder retrieval from a single named ChromaDB collection.
 
     How retrieval works:
-      1. The query_text is embedded with the same MiniLM model used at ingest.
+      1. `query_text` is embedded with the same bi-encoder (MiniLM) used at ingest.
       2. ChromaDB's HNSW index performs approximate nearest-neighbour (ANN)
          search over all stored vectors using cosine distance.
       3. The N chunks with the smallest cosine distance are returned.
+
+    This function does NOT cross-encoder rerank. For agent-quality context,
+    call `src.rag.retriever.retrieve_and_rerank`, which pools Stage-1 hits
+    then reranks with ms-marco-MiniLM-L-6-v2.
 
     Args:
         collection_name: One of 'historical_precedents', 'export_control_corpus',
@@ -650,8 +666,12 @@ def query_multi_collection(
     where: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Query multiple collections simultaneously and return merged results sorted
-    by relevance (ascending cosine distance = most relevant first).
+    Stage-1 bi-encoder retrieval across multiple collections, merged by distance.
+
+    Queries each collection independently (bi-encoder embed + cosine ANN), merges
+    all hits, and sorts by ascending distance. This is a lightweight merge —
+    it does not run cross-encoder reranking. For agent pipelines, prefer
+    `retriever.retrieve_and_rerank`, which pools candidates then reranks jointly.
 
     Used by Agent 7 (Mitigation Recommendation), which needs context from
     all three collections: historical crises, export-control policy, and
@@ -662,7 +682,7 @@ def query_multi_collection(
         n_per_collection:  Results pulled from each collection before merging.
 
     Returns:
-        Merged list of chunk dicts, sorted by distance ascending.
+        Merged list of chunk dicts, sorted by bi-encoder distance ascending.
     """
     if collections is None:
         collections = list(COLLECTION_NAMES.values())

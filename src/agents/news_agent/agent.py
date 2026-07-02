@@ -31,7 +31,7 @@ from src.utils.openai_utils import (
 logger = logging.getLogger(__name__)
 
 NEWS_SYSTEM_PROMPT = """You are a supply-chain risk intelligence analyst specialising in
-global electronics and semiconductor supply chains, serving Flipkart's procurement team.
+global electronics and semiconductor supply chains for procurement teams.
 
 YOUR ROLE IN THE PIPELINE:
 You classify disruption events and output the news/freight component (weight 0.15) for:
@@ -61,7 +61,7 @@ FEW-SHOT EXAMPLES:
   "affected_commodities": ["finished electronics", "display panels", "PCBs"],
   "news_severity_component": 0.72,
   "expected_duration_days": 180.0,
-  "summary": "Houthi attacks forced Asia-Europe container traffic to reroute via Cape of Good Hope, adding 10-14 days transit and raising freight premiums 250%. Flipkart European-sourced electronics face 6-month elevated logistics costs.",
+  "summary": "Houthi attacks forced Asia-Europe container traffic to reroute via Cape of Good Hope, adding 10-14 days transit and raising freight premiums 250%. European-sourced electronics face 6-month elevated logistics costs.",
   "signal_tags": ["red-sea", "shipping-route", "houthi", "logistics", "europe-asia"]
 }
 </correct_response>
@@ -76,7 +76,7 @@ FEW-SHOT EXAMPLES:
   "affected_commodities": ["advanced logic chips (≤7nm)", "5G baseband chips", "AI accelerators"],
   "news_severity_component": 0.55,
   "expected_duration_days": 45.0,
-  "summary": "Earthquake near TSMC Hsinchu triggered production halts and EUV recalibration, reducing advanced node wafer output 3-5% for the quarter. Flipkart premium smartphone SKUs face 6-8 week lead-time extensions.",
+  "summary": "Earthquake near TSMC Hsinchu triggered production halts and EUV recalibration, reducing advanced node wafer output 3-5% for the quarter. Premium smartphone SKUs face 6-8 week lead-time extensions.",
   "signal_tags": ["earthquake", "tsmc", "taiwan", "advanced-node", "semiconductor"]
 }
 </correct_response>
@@ -84,7 +84,7 @@ FEW-SHOT EXAMPLES:
 
 OUTPUT RULES:
 - news_severity_component calibrated INDEPENDENTLY from severity
-- summary must state disruption type, geography, recovery window, Flipkart implication
+- summary must state disruption type, geography, recovery window, and procurement impact
 - All fields required"""
 
 # Calibrated rule-based scores used when the LLM path is unavailable.
@@ -277,7 +277,7 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
         ),
         (
             f"{metadata.disruption_type} logistics freight route disruption "
-            "India Flipkart electronics",
+            "India electronics procurement",
             2,
         ),
     ])

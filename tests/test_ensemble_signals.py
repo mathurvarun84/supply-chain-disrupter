@@ -79,12 +79,19 @@ def test_rag_retriever_cross_encoder_fallback():
 
 
 def test_resolve_embedding_model_hf_repo_id(monkeypatch):
-    """EMBEDDING_MODEL_PATH Hugging Face repo ids must not require a local path."""
+    """EMBEDDING_MODEL_PATH overrides the default Hugging Face repo."""
     import src.rag.utils as rag_utils
 
     monkeypatch.setenv("EMBEDDING_MODEL_PATH", "user/supply-chain-embeddings")
-    monkeypatch.setattr(rag_utils, "FINETUNED_EMBEDDING_MODEL", Path("/nonexistent"))
     assert rag_utils.resolve_embedding_model_name() == "user/supply-chain-embeddings"
+
+
+def test_resolve_embedding_model_default_hf_repo(monkeypatch):
+    """Default embedding model is the project fine-tuned Hugging Face repo."""
+    import src.rag.utils as rag_utils
+
+    monkeypatch.delenv("EMBEDDING_MODEL_PATH", raising=False)
+    assert rag_utils.resolve_embedding_model_name() == rag_utils.DEFAULT_EMBEDDING_REPO
 
 
 def test_query_collection_uses_chroma_singleton():
@@ -102,12 +109,85 @@ def test_query_collection_uses_chroma_singleton():
     mock_client.get_collection.assert_called_once()
 
 
-def test_get_embedding_model_fallback_to_base(tmp_path, monkeypatch):
-    """get_embedding_model falls back to base when fine-tuned path absent."""
+def test_distilbert_model_inputs_drop_token_type_ids():
+    """DistilBERT forward must not receive token_type_ids (transformers 4.57+)."""
+    from src.utils.hf_utils import distilbert_model_inputs
+
+    encoded = {
+        "input_ids": [[1, 2, 3]],
+        "attention_mask": [[1, 1, 1]],
+        "token_type_ids": [[0, 0, 0]],
+    }
+    filtered = distilbert_model_inputs(encoded)
+    assert "token_type_ids" not in filtered
+    assert filtered.keys() == {"input_ids", "attention_mask"}
+
+
+def test_distilbert_inference_strips_token_type_ids():
+    """run_distilbert_inference passes only input_ids/attention_mask to the model."""
+    import torch
+    from src.agents import distilbert_signal
+    from src.agents.distilbert_signal import run_distilbert_inference
+
+    class _FakeModel:
+        eval = lambda self: self
+
+        def __call__(self, **kwargs):
+            assert "token_type_ids" not in kwargs
+            assert "input_ids" in kwargs
+            logits = torch.tensor([[0.1, 0.2, 0.3, 0.4]])
+            return type("Out", (), {"logits": logits})()
+
+    fake_tok = lambda text, **kw: {
+        "input_ids": torch.tensor([[101, 102]]),
+        "attention_mask": torch.tensor([[1, 1]]),
+        "token_type_ids": torch.tensor([[0, 0]]),
+    }
+
+    with patch.object(distilbert_signal, "_model_available", return_value=True):
+        with patch.object(distilbert_signal, "_load_model_and_tokenizer", return_value=(fake_tok, _FakeModel())):
+            result = run_distilbert_inference(
+                {
+                    "order_region": "Eastern Asia",
+                    "product_name": "Laptop",
+                    "known_disruption_event": "COVID-19",
+                    "disruption_news_count": 1,
+                    "supply_disruption_index": 7.0,
+                    "defect_rate_pct": 2.0,
+                    "export_control_level": 3.0,
+                    "risk_score_composite": 0.5,
+                    "lead_time_variance_days": 5.0,
+                },
+                duration_days=3.0,
+            )
+    assert result.model_source == "fine-tuned"
+    assert result.predicted_label == "CRITICAL"
+
+
+def test_embedding_weights_requires_st_config(tmp_path):
+    """Partial weight files without modules.json must not be treated as loadable."""
+    from src.rag.utils import _embedding_weights_present
+
+    incomplete = tmp_path / "incomplete"
+    incomplete.mkdir()
+    (incomplete / "model.safetensors").write_bytes(b"partial")
+    assert _embedding_weights_present(incomplete) is False
+
+    complete = tmp_path / "complete"
+    complete.mkdir()
+    (complete / "model.safetensors").write_bytes(b"ok")
+    (complete / "modules.json").write_text("[]")
+    assert _embedding_weights_present(complete) is True
+
+
+def test_get_embedding_model_fallback_to_base(monkeypatch):
+    """get_embedding_model falls back to base MiniLM when Hugging Face load fails."""
     import src.rag.utils as rag_utils
 
-    monkeypatch.setattr(rag_utils, "FINETUNED_EMBEDDING_MODEL", tmp_path / "nonexistent")
     monkeypatch.delenv("EMBEDDING_MODEL_PATH", raising=False)
-    rag_utils.get_embedding_model.cache_clear() if hasattr(rag_utils.get_embedding_model, "cache_clear") else None
-    ef = rag_utils.get_embedding_model()
+    with patch("src.rag.utils.SentenceTransformerEmbeddingFunction") as mock_ef:
+        mock_ef.side_effect = [RuntimeError("hub unavailable"), object()]
+        ef = rag_utils.get_embedding_model()
     assert ef is not None
+    assert mock_ef.call_count == 2
+    assert mock_ef.call_args_list[1].kwargs["model_name"] == rag_utils.EMBEDDING_MODEL

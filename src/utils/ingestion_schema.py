@@ -183,6 +183,45 @@ _DDL_STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_live_weather_run ON live_weather_ingest(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_live_weather_city ON live_weather_ingest(hub_city, fetched_at_utc DESC)",
+    # ── L1 signal tables: written by live_ingest, read by L2/L3 agents ──
+    """
+    CREATE TABLE IF NOT EXISTS weather_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        hub TEXT NOT NULL,
+        latitude REAL,
+        longitude REAL,
+        observation_date TEXT NOT NULL,
+        severity REAL,
+        wind_score REAL,
+        precipitation_score REAL,
+        weather_code_score REAL,
+        max_wind_speed REAL,
+        max_precipitation REAL,
+        weather_summary TEXT,
+        source_type TEXT DEFAULT 'live_weather',
+        ingestion_ts TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (hub, observation_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_weather_signals_hub ON weather_signals(hub, observation_date)",
+    """
+    CREATE TABLE IF NOT EXISTS news_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        summary TEXT,
+        url TEXT,
+        publisher TEXT,
+        published_at TEXT,
+        detected_region TEXT,
+        detected_category TEXT,
+        query_tag TEXT,
+        content_hash TEXT UNIQUE,
+        source_type TEXT DEFAULT 'live_news',
+        ingestion_ts TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_news_signals_region ON news_signals(detected_region)",
+    "CREATE INDEX IF NOT EXISTS idx_news_signals_published ON news_signals(published_at)",
 ]
 
 

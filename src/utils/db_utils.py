@@ -65,56 +65,10 @@ def ensure_schema() -> None:
 
 
 def ensure_ingestion_schema() -> None:
-    """Create the live-ingestion tables written by the Data Ingestion agent.
+    """Create all live-ingestion tables (delegates to ingestion_schema)."""
+    from src.utils.ingestion_schema import ensure_ingestion_schema as _ensure_all
 
-    These hold runtime signals fetched from external APIs (Open-Meteo, GDELT/RSS),
-    kept separate from the historical workbook tables built by etl_loader. They are
-    idempotent so the live poller can run repeatedly.
-    """
-    with get_connection() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS weather_signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hub TEXT NOT NULL,
-                latitude REAL,
-                longitude REAL,
-                observation_date TEXT NOT NULL,
-                severity REAL,
-                wind_score REAL,
-                precipitation_score REAL,
-                weather_code_score REAL,
-                max_wind_speed REAL,
-                max_precipitation REAL,
-                weather_summary TEXT,
-                source_type TEXT DEFAULT 'live_weather',
-                ingestion_ts TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (hub, observation_date)
-            );
-
-            CREATE TABLE IF NOT EXISTS news_signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                summary TEXT,
-                url TEXT,
-                publisher TEXT,
-                published_at TEXT,
-                detected_region TEXT,
-                detected_category TEXT,
-                query_tag TEXT,
-                content_hash TEXT UNIQUE,
-                source_type TEXT DEFAULT 'live_news',
-                ingestion_ts TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_weather_signals_hub
-                ON weather_signals(hub, observation_date);
-            CREATE INDEX IF NOT EXISTS idx_news_signals_region
-                ON news_signals(detected_region);
-            CREATE INDEX IF NOT EXISTS idx_news_signals_published
-                ON news_signals(published_at);
-            """
-        )
+    _ensure_all()
 
 
 def upsert_weather_signal(signal: Dict[str, Any]) -> None:
@@ -173,6 +127,7 @@ def insert_news_signals(articles: List[Dict[str, Any]]) -> int:
 
 
 def fetch_latest_weather_signal(hub: str) -> Optional[Dict[str, Any]]:
+    ensure_ingestion_schema()
     rows = execute_query(
         """
         SELECT * FROM weather_signals
@@ -188,6 +143,7 @@ def fetch_latest_weather_signal(hub: str) -> Optional[Dict[str, Any]]:
 def fetch_recent_news(
     region: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:
+    ensure_ingestion_schema()
     if region:
         rows = execute_query(
             """

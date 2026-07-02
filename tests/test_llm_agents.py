@@ -195,8 +195,8 @@ def test_canceled_shipment_floor_when_llm_disagrees():
     assert rc.critical_flag is True
 
 
-def test_mitigation_agent_llm_path():
-    """Mitigation agent produces structured action when LLM succeeds."""
+def test_mitigation_agent_rule_based():
+    """Mitigation agent produces rule-based actions from risk classification."""
     from src.agents.mitigation_agent import mitigation_recommendation_agent
 
     risk = RiskClassificationResult(
@@ -213,23 +213,12 @@ def test_mitigation_agent_llm_path():
         active_record={"event_date": "2024-01-01", "port": "Rotterdam", "sku": "CHIP_AP"},
         risk_classification=risk,
     )
-    mock_output = MitigationLLMOutput(
-        summary="HIGH risk test",
-        ranked_actions=["[ROUTING] test", "[INVENTORY] test", "[SOURCING] test"],
-        cost_estimate="MEDIUM: test",
-        urgency="HIGH",
-        rag_citations=["Source: test — relevance"],
-        india_sourcing_recommendations=["Dixon Technologies — test"],
-    )
-    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.call_openai_structured", return_value=mock_output):
-            with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=""):
-                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
-                    result = mitigation_recommendation_agent(state)
+    with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+        result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
-    assert action.summary == "HIGH risk test"
+    assert "HIGH" in action.summary
     assert len(action.recommendations) == 3
-    assert action.urgency == "HIGH"
+    assert "stockout" in action.recommendations[0].lower()
 
 
 def test_pydantic_schemas_are_flat():

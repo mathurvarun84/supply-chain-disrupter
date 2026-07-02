@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from src.agents.state import DistilBERTSignal
+from src.utils.hf_utils import (
+    distilbert_model_inputs,
+    from_pretrained_kwargs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +49,9 @@ def _load_model_and_tokenizer():
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     model_path = _resolve_model_path()
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForSequenceClassification.from_pretrained(model_path)
+    load_kw = from_pretrained_kwargs(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, **load_kw)
+    model = AutoModelForSequenceClassification.from_pretrained(model_path, **load_kw)
     model.eval()
     return tokenizer, model
 
@@ -130,12 +135,14 @@ def run_distilbert_inference(
         tokenizer, model = _load_model_and_tokenizer()
         text = build_distilbert_text(record, duration_days=duration_days)
 
-        inputs = tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=MAX_LENGTH,
-            padding=True,
+        inputs = distilbert_model_inputs(
+            tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=MAX_LENGTH,
+                padding=True,
+            )
         )
         with torch.no_grad():
             logits = model(**inputs).logits

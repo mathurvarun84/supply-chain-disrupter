@@ -5,6 +5,8 @@ from src.agents.state import RiskClassificationResult
 from src.dashboard.data_loader import show_data_loader
 from src.dashboard.ingestion_dashboard import show_ingestion_dashboard
 from src.utils.db_utils import ensure_schema, fetch_scenario_options
+from src.utils.ingestion_schema import ensure_ingestion_schema
+from src.utils.openai_utils import has_openai_api_key
 from src.rag.utils import query_chroma_rag
 
 
@@ -63,10 +65,17 @@ def _render_ensemble_signals(rc: RiskClassificationResult) -> None:
             if jv.disagreement_explanation:
                 st.warning(f"⚠️ Disagreement: {jv.disagreement_explanation}")
     else:
-        st.info(
-            "Judge verdict not available — set `OPENAI_API_KEY` in `.env` at the project root "
-            "and restart Streamlit. Signal 3 (GPT-4o) uses the same key."
-        )
+        if has_openai_api_key():
+            st.info(
+                "Judge verdict not available — OpenAI API call failed (often corporate TLS "
+                "blocking api.openai.com). You already have `INGEST_INSECURE_SSL=1` in `.env`; "
+                "restart Streamlit so Signal 3 and the Judge use the same SSL bypass."
+            )
+        else:
+            st.info(
+                "Judge verdict not available — set `OPENAI_API_KEY` in `.env` at the project "
+                "root and restart Streamlit. Signal 3 (GPT-4o) uses the same key."
+            )
 
 
 def show_rag_search() -> None:
@@ -98,6 +107,7 @@ def show_scenario_analyzer() -> None:
         "Open-Meteo weather data."
     )
     ensure_schema()
+    ensure_ingestion_schema()
     try:
         options = fetch_scenario_options()
     except Exception:

@@ -29,6 +29,7 @@ from src.utils.db_utils import (
     insert_risk_classification,
     update_risk_label,
 )
+from src.utils.etl_loader import SPEC_NORM_BOUNDS
 from src.rag.utils import query_chroma_rag
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def _get_norm_bounds() -> dict:
         "natural_disaster_risk":   (q[2] or 1.18,  q[3] or 10.0),
         "supply_disruption_index": (q[4] or 4.09,  q[5] or 9.97),
         "defect_rate_pct":         (q[6] or 2.0,   q[7] or 19.82),
-        "disruption_news_count":   (q[8] or 0.0,   q[9] or 17.0),
+        "disruption_news_count":   (q[8] or 0.0,   q[9] or SPEC_NORM_BOUNDS["disruption_news_count"][1]),
     }
     logger.info("Normalization bounds loaded from SQLite: %s", bounds)
     return bounds

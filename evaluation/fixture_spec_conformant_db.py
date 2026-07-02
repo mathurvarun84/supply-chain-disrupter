@@ -47,6 +47,16 @@ sys.path.insert(0, ".")  # allow imports from project root
 
 DB_PATH = "outputs/supply_chain.db"
 
+# Synthetic fixture spans v3.1 bounds except news_count max (17 in seed rows).
+FIXTURE_LITE_MASTER_ROWS = 4
+FIXTURE_NORM_BOUNDS = {
+    "weather_severity_hub":    (1.18, 10.0),
+    "natural_disaster_risk":   (1.18, 10.0),
+    "supply_disruption_index": (4.09, 9.97),
+    "defect_rate_pct":         (2.0,  19.82),
+    "disruption_news_count":   (0.0,  17.0),
+}
+
 
 def drop_existing_db() -> None:
     """Remove any existing DB file so we always start from a clean state."""
