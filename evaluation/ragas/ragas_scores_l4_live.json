@@ -1,0 +1,133 @@
+{
+  "mode": "l4_live",
+  "run_at_utc": "2026-07-03T11:17:31.784044+00:00",
+  "judge_model": "gpt-4.1-mini",
+  "judge_embeddings": "text-embedding-3-small",
+  "n_per_bucket": 1,
+  "n_orders_total": 4,
+  "n_orders_evaluated": 4,
+  "n_orders_skipped": 0,
+  "overall": {
+    "faithfulness": 0.0982,
+    "answer_relevancy": 0.342,
+    "n_cases": 4
+  },
+  "by_delivery_status": {
+    "Shipping canceled": {
+      "faithfulness": 0.0909,
+      "answer_relevancy": 0.2339,
+      "n_cases": 1
+    },
+    "Late delivery": {
+      "faithfulness": 0.1111,
+      "answer_relevancy": 0.466,
+      "n_cases": 1
+    },
+    "Shipping on time": {
+      "faithfulness": 0.1,
+      "answer_relevancy": 0.5338,
+      "n_cases": 1
+    },
+    "Advance shipping": {
+      "faithfulness": 0.0909,
+      "answer_relevancy": 0.1343,
+      "n_cases": 1
+    }
+  },
+  "flagged": [
+    {
+      "delivery_status": "Shipping canceled",
+      "metric": "faithfulness",
+      "score": 0.0909,
+      "target": 0.85,
+      "gap": 0.7591
+    },
+    {
+      "delivery_status": "Advance shipping",
+      "metric": "faithfulness",
+      "score": 0.0909,
+      "target": 0.85,
+      "gap": 0.7591
+    },
+    {
+      "delivery_status": "Shipping on time",
+      "metric": "faithfulness",
+      "score": 0.1,
+      "target": 0.85,
+      "gap": 0.75
+    },
+    {
+      "delivery_status": "Late delivery",
+      "metric": "faithfulness",
+      "score": 0.1111,
+      "target": 0.85,
+      "gap": 0.7389
+    },
+    {
+      "delivery_status": "Advance shipping",
+      "metric": "answer_relevancy",
+      "score": 0.1343,
+      "target": 0.8,
+      "gap": 0.6657
+    },
+    {
+      "delivery_status": "Shipping canceled",
+      "metric": "answer_relevancy",
+      "score": 0.2339,
+      "target": 0.8,
+      "gap": 0.5661
+    },
+    {
+      "delivery_status": "Late delivery",
+      "metric": "answer_relevancy",
+      "score": 0.466,
+      "target": 0.8,
+      "gap": 0.334
+    },
+    {
+      "delivery_status": "Shipping on time",
+      "metric": "answer_relevancy",
+      "score": 0.5338,
+      "target": 0.8,
+      "gap": 0.2662
+    }
+  ],
+  "per_case": [
+    {
+      "order_id": 246,
+      "delivery_status": "Shipping canceled",
+      "predicted_label": "CRITICAL",
+      "faithfulness": 0.0909,
+      "answer_relevancy": 0.2339,
+      "answer": "The rule-based label of CRITICAL is appropriate given the delivery status of 'Shipping canceled', which directly impacts the fulfillment layer. The composite score of 0.447, while not reaching the CRITICAL threshold on its own, is overridden by the delivery status. The RAG context does not provide a direct precedent for this specific scenario, but the historical precedent of the Thailand floods (chunk 2) highlights the importance of accounting for multi-month disruptions in supply chains, which aligns with the severity implied by a shipping cancellation. The defect component is also notably high at 0.6263, contributing to the overall risk assessment.",
+      "evaluated": true
+    },
+    {
+      "order_id": 15,
+      "delivery_status": "Late delivery",
+      "predicted_label": "HIGH",
+      "faithfulness": 0.1111,
+      "answer_relevancy": 0.466,
+      "answer": "The rule-based label of HIGH is appropriate given the composite score of 0.443 and the late delivery status. The semiconductor signals indicate a LOW risk for the year 2015, with SDI and ECL values consistent across multiple companies, suggesting no significant semiconductor supply chain disruptions. The RAG context does not provide a strong precedent for escalating the risk to CRITICAL or reducing it to MEDIUM, as the historical precedents cited do not directly correlate with the current situation in South America. The primary driver remains the defect component, which is the highest weighted factor in the composite score.",
+      "evaluated": true
+    },
+    {
+      "order_id": 13,
+      "delivery_status": "Shipping on time",
+      "predicted_label": "LOW",
+      "faithfulness": 0.1,
+      "answer_relevancy": 0.5338,
+      "answer": "The rule-based label of LOW is appropriate given the composite score of 0.401 and the delivery status being 'Shipping on time'. The semiconductor signals for 2015 indicate a low risk with SDI values of 6.48, which aligns with the LOW risk classification. The RAG context does not provide any relevant historical precedents that suggest a higher risk level for the current situation. The historical precedents cited involve significant events like earthquakes and floods, which are not applicable to the current scenario in Central America. Therefore, the risk remains LOW with no immediate action required.",
+      "evaluated": true
+    },
+    {
+      "order_id": 57,
+      "delivery_status": "Advance shipping",
+      "predicted_label": "LOW",
+      "faithfulness": 0.0909,
+      "answer_relevancy": 0.1343,
+      "answer": "The rule-based classification of LOW is appropriate given the composite score of 0.388 and the delivery status of 'Advance shipping', which indicates no immediate disruption. The RAG context does not provide any relevant historical precedents that suggest a higher risk level. The semiconductor signals for 2015 also indicate a LOW risk with SDI and ECL values consistent across multiple companies. The primary driver remains the supply component, which is low and does not warrant escalation.",
+      "evaluated": true
+    }
+  ]
+}

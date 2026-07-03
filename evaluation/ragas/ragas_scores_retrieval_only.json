@@ -1,0 +1,80 @@
+{
+  "mode": "retrieval-only",
+  "run_at_utc": "2026-07-03T07:23:36.208519+00:00",
+  "params": {
+    "bi_encoder_top_n": 10,
+    "rerank_top_k": 3
+  },
+  "overall": {
+    "hit_rate_at_k": 1.0,
+    "mrr": 0.9,
+    "mean_context_relevance": 0.5937,
+    "mean_context_recall_proxy": 0.8253,
+    "n_cases": 5
+  },
+  "by_collection": {
+    "historical_precedents": {
+      "hit_rate_at_k": 1.0,
+      "mrr": 0.9,
+      "mean_context_relevance": 0.5937,
+      "mean_context_recall_proxy": 0.8253,
+      "n_cases": 5
+    }
+  },
+  "by_style": {
+    "agent_pattern": {
+      "hit_rate_at_k": 1.0,
+      "mrr": 0.9,
+      "mean_context_relevance": 0.5937,
+      "mean_context_recall_proxy": 0.8253,
+      "n_cases": 5
+    }
+  },
+  "per_case": [
+    {
+      "question": "Taiwan seismic risk Philippine Sea Plate Eurasian Plate 2024 Hualien earthquake TSMC fab evacuation",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "hit": true,
+      "rank": 1,
+      "context_relevance": 0.5672,
+      "context_recall_proxy": 0.9332
+    },
+    {
+      "question": "China MOFCOM gallium germanium export control license requirement semiconductor GaN GaAs raw material restriction 2023",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "hit": true,
+      "rank": 2,
+      "context_relevance": 0.6549,
+      "context_recall_proxy": 0.7567
+    },
+    {
+      "question": "China antimony export controls 2024 semiconductor dopants flame retardants PCB global production share",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "hit": true,
+      "rank": 1,
+      "context_relevance": 0.433,
+      "context_recall_proxy": 0.696
+    },
+    {
+      "question": "Apple India manufacturing diversification Foxconn Zhengzhou crisis iPhone production share mitigation",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "hit": true,
+      "rank": 1,
+      "context_relevance": 0.6862,
+      "context_recall_proxy": 0.8898
+    },
+    {
+      "question": "ASE Group OSAT Tainan earthquake operations suspension chip packaging safety inspection",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "hit": true,
+      "rank": 1,
+      "context_relevance": 0.6271,
+      "context_recall_proxy": 0.8508
+    }
+  ]
+}

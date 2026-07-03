@@ -7,6 +7,9 @@ Produces:
   3. Cross-encoder reranking demo
   4. GPT-4o-mini fine-tuning result
   5. Consolidated evaluation_report.json
+  6. RAGAS RAG-quality scores (retrieval-only hit-rate/MRR always;
+     full Faithfulness/Answer Relevancy/Context Precision/Recall when
+     evaluation/ragas/run_evaluation.py --mode full has been run)
 """
 
 from __future__ import annotations
@@ -134,6 +137,85 @@ def evaluate_gpt_finetuned() -> dict:
         return json.load(f)
 
 
+def evaluate_ragas():
+    """
+    Load Phase 1-3 RAGAS evaluation outputs (does not re-run retrieval,
+    generation, or scoring — those already happened in
+    evaluation/ragas/run_evaluation.py). Returns a consolidated dict for
+    the Day 23 evaluation report, or None if neither RAGAS output file
+    exists yet.
+    """
+    retrieval_path = Path("evaluation/ragas/ragas_scores_retrieval_only.json")
+    full_path = Path("evaluation/ragas/ragas_scores_full.json")
+
+    if not retrieval_path.exists() and not full_path.exists():
+        logger.warning(
+            "No RAGAS scores found. Run evaluation/ragas/run_evaluation.py "
+            "(Phase 3) first — retrieval-only mode costs nothing, full mode "
+            "requires OPENAI_API_KEY."
+        )
+        return None
+
+    result = {"retrieval_only": None, "full": None}
+
+    if retrieval_path.exists():
+        with open(retrieval_path) as f:
+            r = json.load(f)
+        result["retrieval_only"] = {
+            "hit_rate_at_k": r["overall"]["hit_rate_at_k"],
+            "mrr": r["overall"]["mrr"],
+            "mean_context_relevance": r["overall"]["mean_context_relevance"],
+            "mean_context_recall_proxy": r["overall"]["mean_context_recall_proxy"],
+            "n_cases": r["overall"]["n_cases"],
+            "by_collection": r["by_collection"],
+        }
+        logger.info(
+            "RAGAS retrieval-only: hit_rate@k=%.3f  mrr=%.3f  (n=%d)",
+            r["overall"]["hit_rate_at_k"], r["overall"]["mrr"], r["overall"]["n_cases"],
+        )
+    else:
+        logger.warning(
+            "ragas_scores_retrieval_only.json not found — run Phase 3 "
+            "retrieval-only mode (free, no API key needed)."
+        )
+
+    if full_path.exists():
+        with open(full_path) as f:
+            fdat = json.load(f)
+        result["full"] = {
+            "faithfulness": fdat["overall"]["faithfulness"],
+            "answer_relevancy": fdat["overall"]["answer_relevancy"],
+            "context_precision": fdat["overall"]["context_precision"],
+            "context_recall": fdat["overall"]["context_recall"],
+            "n_cases": fdat["overall"]["n_cases"],
+            "by_collection": fdat["by_collection"],
+            "flagged": fdat["flagged"],
+        }
+        logger.info(
+            "RAGAS full: faithfulness=%.3f  answer_relevancy=%.3f  "
+            "context_precision=%.3f  context_recall=%.3f  (n=%d)",
+            fdat["overall"]["faithfulness"], fdat["overall"]["answer_relevancy"],
+            fdat["overall"]["context_precision"], fdat["overall"]["context_recall"],
+            fdat["overall"]["n_cases"],
+        )
+        if fdat["flagged"]:
+            logger.warning(
+                "RAGAS flagged %d weak (collection, metric) pairs below target — "
+                "see evaluation_report.json['ragas']['full']['flagged'].",
+                len(fdat["flagged"]),
+            )
+    else:
+        logger.warning(
+            "ragas_scores_full.json not found — full RAGAS metrics "
+            "(Faithfulness, Answer Relevancy, Context Precision/Recall) "
+            "will be absent from the evaluation report. Run Phase 3 with "
+            "--mode full if budget allows; the report is still valid "
+            "without it, just less complete."
+        )
+
+    return result
+
+
 def run_all_evaluations() -> dict:
     """
     Run all Day 23 capstone evaluations and write a consolidated report.
@@ -148,6 +230,8 @@ def run_all_evaluations() -> dict:
         "cross_encoder": evaluate_cross_encoder_reranking(),
         "gpt_finetuned": evaluate_gpt_finetuned(),
     }
+    logger.info("\n--- RAGAS: RAG Evaluation (Phases 1-3) ---")
+    results["ragas"] = evaluate_ragas()
     Path("fine_tuning/data").mkdir(exist_ok=True)
     with open("fine_tuning/data/evaluation_report.json", "w") as f:
         json.dump(results, f, indent=2, default=str)

@@ -31,6 +31,9 @@ data/*.db
 # Local test run output
 test_master_v3_output.txt
 
+# RAGAS trace captures (regenerated per run; test_dataset.json IS committed)
+evaluation/ragas/traces/
+
 # Jupyter
 .ipynb_checkpoints/
 
