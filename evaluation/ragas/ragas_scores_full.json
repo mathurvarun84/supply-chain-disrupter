@@ -1,0 +1,116 @@
+{
+  "mode": "full",
+  "run_at_utc": "2026-07-03T10:18:14.341249+00:00",
+  "ragas_version": "0.4.3",
+  "judge_model": "gpt-4.1-mini",
+  "judge_embeddings": "text-embedding-3-small",
+  "params": {
+    "bi_encoder_top_n": 10,
+    "rerank_top_k": 3
+  },
+  "n_cases_total": 6,
+  "n_cases_evaluated": 6,
+  "n_cases_skipped_no_context": 0,
+  "overall": {
+    "faithfulness": 1.0,
+    "answer_relevancy": 0.6861,
+    "context_precision": 0.9722,
+    "context_recall": 1.0,
+    "n_cases": 6
+  },
+  "by_collection": {
+    "historical_precedents": {
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6861,
+      "context_precision": 0.9722,
+      "context_recall": 1.0,
+      "n_cases": 6
+    }
+  },
+  "by_style": {
+    "agent_pattern": {
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6861,
+      "context_precision": 0.9722,
+      "context_recall": 1.0,
+      "n_cases": 6
+    }
+  },
+  "flagged": [
+    {
+      "source_collection": "historical_precedents",
+      "metric": "answer_relevancy",
+      "score": 0.6861,
+      "target": 0.8,
+      "gap": 0.1139
+    }
+  ],
+  "per_case": [
+    {
+      "question": "Taiwan seismic risk Philippine Sea Plate Eurasian Plate 2024 Hualien earthquake TSMC fab evacuation",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "evaluated": true,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7346,
+      "context_precision": 1.0,
+      "context_recall": 1.0,
+      "answer": "The 2024 Hualien earthquake, with a magnitude of 7.4, led to temporary evacuations at TSMC's Hualien fab (TSMC Fab 14 / N28 node). However, major production was not disrupted due to the epicenter's distance from the primary Hsinchu complex. Taiwan's location at the convergence of the Philippine Sea Plate and Eurasian Plate makes it a region of high seismic activity, with significant earthquakes occurring every 2-5 years."
+    },
+    {
+      "question": "China MOFCOM gallium germanium export control license requirement semiconductor GaN GaAs raw material restriction 2023",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "evaluated": true,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7304,
+      "context_precision": 1.0,
+      "context_recall": 1.0,
+      "answer": "China's Ministry of Commerce (MOFCOM) announced on July 3, 2023, that gallium and germanium would be subject to export licensing controls effective August 1, 2023. This affects the production of GaN and GaAs semiconductors, among other applications. The controls are seen as a response to US semiconductor export controls and similar measures by Japan and the Netherlands. China controls a significant portion of global production for these materials, which are critical for semiconductor manufacturing."
+    },
+    {
+      "question": "China antimony export controls 2024 semiconductor dopants flame retardants PCB global production share",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "evaluated": true,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7225,
+      "context_precision": 0.8333,
+      "context_recall": 1.0,
+      "answer": "In 2024, China added antimony to its export control lists. Antimony is used in flame retardants for electronics PCBs, semiconductor dopants, and in lead-acid batteries. China controls approximately 50-60 percent of global antimony production."
+    },
+    {
+      "question": "Apple India manufacturing diversification Foxconn Zhengzhou crisis iPhone production share mitigation",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "evaluated": true,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7031,
+      "context_precision": 1.0,
+      "context_recall": 1.0,
+      "answer": "Apple responded to the Foxconn Zhengzhou crisis by accelerating its manufacturing diversification strategy in India. This included expanding operations with Foxconn India, Wistron, and Pegatron Chennai plants. As a result, India's share of global iPhone manufacturing increased from under 1% in 2021 to approximately 7% in 2023, and is expected to rise to over 14% by 2024. This move was a direct risk mitigation response to the production disruptions at the Zhengzhou plant, which manufactures about 70% of iPhones globally."
+    },
+    {
+      "question": "ASE Group OSAT Tainan earthquake operations suspension chip packaging safety inspection",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "evaluated": true,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.5825,
+      "context_precision": 1.0,
+      "context_recall": 1.0,
+      "answer": "The ASE Group, a major OSAT company, temporarily suspended operations at its facilities in Tainan following a magnitude 6.4 earthquake on February 6, 2016. This suspension was to conduct safety inspections and structural assessments of their facilities."
+    },
+    {
+      "question": "foreign input reliance semiconductor gross output weighting purchasing economy supplying share formula",
+      "source_collection": "historical_precedents",
+      "query_style": "agent_pattern",
+      "evaluated": true,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6434,
+      "context_precision": 1.0,
+      "context_recall": 1.0,
+      "answer": "The formula for calculating the Foreign Input Reliance (FIR) on semiconductors for a purchasing industry and economy is given as:\n\n\\( FIR_{c,j}^{semi} = \\frac{\\sum_{c'}^{N} Foreign\\ output_{c,j}^{c',semi}}{Gross\\ output_{c,j}} \\).\n\nThis is then averaged by purchasing economy across purchasing industries, weighting by the industries’ gross output:\n\n\\( FIR_{c}^{semi} = \\sum_{j=1}^{7} (FIR_{c,j}^{semi} \\times W_{cj}^{GO}) \\), where \\( W_{cj}^{GO} = \\frac{GO_{cj}}{\\sum_{j'=1}^{7} GO_{cj'}} \\).\n\nThe share of FIR explained by a supplying economy is computed as:\n\n\\( ShareSupp_{c,c'}^{semi} = \\sum_{j=1}^{7} \\left( \\frac{FIR_{c,j}^{c',semi}}{FIR_{c,j}^{semi}} \\times W_{cj}^{GO} \\right) \\)."
+    }
+  ]
+}

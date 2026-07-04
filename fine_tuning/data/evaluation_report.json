@@ -1,0 +1,53 @@
+{
+  "distilbert": {},
+  "embeddings": {},
+  "cross_encoder": {
+    "query": "Taiwan earthquake semiconductor supply chain production halt 2022",
+    "raw_count": 3,
+    "reranked_count": 3
+  },
+  "gpt_finetuned": {},
+  "ragas": {
+    "retrieval_only": {
+      "hit_rate_at_k": 1.0,
+      "mrr": 0.9,
+      "mean_context_relevance": 0.5937,
+      "mean_context_recall_proxy": 0.8253,
+      "n_cases": 5,
+      "by_collection": {
+        "historical_precedents": {
+          "hit_rate_at_k": 1.0,
+          "mrr": 0.9,
+          "mean_context_relevance": 0.5937,
+          "mean_context_recall_proxy": 0.8253,
+          "n_cases": 5
+        }
+      }
+    },
+    "full": {
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6861,
+      "context_precision": 0.9722,
+      "context_recall": 1.0,
+      "n_cases": 6,
+      "by_collection": {
+        "historical_precedents": {
+          "faithfulness": 1.0,
+          "answer_relevancy": 0.6861,
+          "context_precision": 0.9722,
+          "context_recall": 1.0,
+          "n_cases": 6
+        }
+      },
+      "flagged": [
+        {
+          "source_collection": "historical_precedents",
+          "metric": "answer_relevancy",
+          "score": 0.6861,
+          "target": 0.8,
+          "gap": 0.1139
+        }
+      ]
+    }
+  }
+}
