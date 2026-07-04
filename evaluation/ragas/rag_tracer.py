@@ -141,7 +141,10 @@ class RAGTraceCollector:
             original = getattr(module, attr)
             wrapper = self._make_wrapper(original, attr, kind)
             # Patch the canonical module AND every already-imported module
-            # holding its own reference to the same function object.
+            # holding its own reference to the same function object (e.g.
+            # `from src.rag.retriever import retrieve_and_rerank` inside an
+            # agent module) — otherwise that agent would keep calling the
+            # unpatched original and never get traced.
             for mod in list(sys.modules.values()):
                 if mod is None:
                     continue
@@ -220,6 +223,7 @@ class RAGTraceCollector:
         return self._pending
 
     def _finalize_pending(self) -> None:
+        """Close out the in-progress record (called on mark_question(), __exit__, or after the LLM call)."""
         if self._pending is None:
             return
         pending = self._pending
@@ -235,11 +239,14 @@ class RAGTraceCollector:
     # -- capture handlers ------------------------------------------------------
 
     def _on_retrieval(self, attr: str, args, kwargs, results) -> None:
+        """Record one retrieval call's query, collection(s), and hit texts onto the pending record."""
         pending = self._ensure_pending()
 
         query = args[0] if args else kwargs.get("query", kwargs.get("query_text", ""))
         pending["retrieval_queries"].append(str(query))
 
+        # retrieve_and_rerank and query_chroma_rag pass the collection(s) differently
+        # (positional list vs single named kwarg/positional arg) — normalise both to a list.
         if attr == "retrieve_and_rerank":
             collections = args[1] if len(args) > 1 else kwargs.get("collections", [])
         else:  # query_chroma_rag
@@ -264,6 +271,8 @@ class RAGTraceCollector:
             score_entry: Dict[str, Any] = {
                 "source_file": meta.get("source_file", meta.get("source", "unknown")),
             }
+            # Cross-encoder-reranked hits carry a rerank score; Stage-1-only hits
+            # (query_chroma_rag) only have the raw ANN distance — record whichever applies.
             if "cross_encoder_score" in hit:
                 score_entry["cross_encoder_score"] = hit["cross_encoder_score"]
             else:
@@ -330,6 +339,8 @@ def trace_retrieval_only(
                 question, n_results=n_results, collection_name=collection
             )
 
+        # Reconstruct each retrieved chunk's id (ChromaDB hits don't carry it back)
+        # so it can be compared against the gold source_chunk_id below.
         retrieved_ids = [
             _chunk_id_for_hit(hit, collection, chunk_id_convention)
             for hit in hits or []

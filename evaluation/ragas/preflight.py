@@ -81,8 +81,9 @@ def run_preflight(strict: bool = True) -> bool:
     if not existing:
         print("  (none)")
 
-    problems: List[str] = []
+    problems: List[str] = []  # collected across all expected collections, reported together at the end
 
+    # 2. Existence + minimum-size check for each collection Phase 1 will sample from
     for cname in EXPECTED_COLLECTIONS:
         print(f"\n--- {cname} ---")
         if cname not in existing:
