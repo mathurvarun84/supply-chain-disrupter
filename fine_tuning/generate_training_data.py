@@ -60,9 +60,9 @@ def load_distilbert_data() -> tuple:
     """
     Build DistilBERT training/validation splits from SQLite lite_master.
 
-    Queries Signal 2 features (excluding delivery_status), performs a stratified
-    80/10/10 split, applies duration augmentation on train, and saves the held-out
-    test set to fine_tuning/data/distilbert_test_split.json.
+    Queries Signal 2 features, performs a stratified 80/10/10 split, applies
+    duration augmentation on train, and saves the held-out test set to
+    fine_tuning/data/distilbert_test_split.json.
 
     Returns:
         (X_train, y_train, X_val, y_val) — lists of text strings and integer labels.
