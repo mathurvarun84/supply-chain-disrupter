@@ -1,0 +1,1 @@
+{"root":["./src/main.tsx","./src/vite-env.d.ts","./src/app/app.tsx","./src/app/_reference/app.mockup.tsx","./src/app/components/agentnode.tsx","./src/app/components/tabplaceholder.tsx","./src/app/hooks/usepipelinestatus.ts","./src/styles/tokens.ts"],"version":"5.9.3"}

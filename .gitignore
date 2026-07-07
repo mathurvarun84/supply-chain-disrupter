@@ -37,6 +37,11 @@ evaluation/ragas/traces/
 # Jupyter
 .ipynb_checkpoints/
 
+# Node / frontend
+node_modules/
+dist/
+.env.local
+
 # IDEs
 .vscode/
 .idea/

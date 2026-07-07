@@ -67,6 +67,18 @@ External World
 
 The pipeline is orchestrated by `src/agents/langgraph_engine.py:run_agent_graph()`. Each agent reads from and writes to a shared `GlobalState` Pydantic object.
 
+### LangGraph orchestration changes
+
+The current runtime uses a compiled `StateGraph(GlobalState)` built per scenario payload by `build_agent_graph(payload)`. The graph is intentionally linear and explicit:
+
+- `START -> L1` initializes the ingestion node with the incoming payload.
+- `L1` runs the ingestion node, which first tries the production v2 ingestion path (`data_ingestion_agent_v2`) and falls back to the legacy shim (`data_ingestion_agent`) if the newer path fails.
+- `L2 -> L3 -> L4` are the critical-path agents; they are wrapped so the graph receives a plain state delta rather than a full state object.
+- `L5 -> L6 -> L7` are optional agents. They are wrapped with skip-and-continue behavior so a failure is logged and the pipeline continues instead of aborting the whole run.
+- The graph currently stays sequential rather than parallel: L2 and L3 are ordered one after the other because `agent_logs` is shared state and the current `GlobalState` model does not yet use LangGraph reducers for concurrent writes.
+
+`run_agent_graph()` invokes the compiled app and returns a validated `GlobalState`; a backward-compatible `run_agent_sequence()` helper remains available for debugging and manual execution.
+
 ---
 
 ## L1 — Data Ingestion
@@ -395,7 +407,7 @@ critical_flag is set only when final_label == "CRITICAL"
 
 ---
 
-## L5 — Demand Forecasting (Optional)
+## L5 — Demand Forecasting
 
 **Module:** `src/agents/langgraph_engine.py:demand_forecasting_agent()`
 
@@ -412,7 +424,7 @@ Flow:
 
 ---
 
-## L6 — Monte Carlo Simulation (Optional)
+## L6 — Monte Carlo Simulation
 
 **Module:** `src/agents/langgraph_engine.py:simulation_agent()`
 
