@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { AgentNode } from "./components/AgentNode";
 import { TabPlaceholder } from "./components/TabPlaceholder";
+import { TabLiveFeed } from "./TabLiveFeed";
 import { usePipelineStatus } from "./hooks/usePipelineStatus";
 
 const TABS = [
@@ -122,7 +123,11 @@ export default function App() {
 
           {/* Tab Body */}
           <div className="flex-1 overflow-hidden bg-background">
-            <TabPlaceholder title={TABS[activeTab].label} day={TABS[activeTab].day} />
+            {activeTab === 0 ? (
+              <TabLiveFeed onTabSwitch={setActiveTab} />
+            ) : (
+              <TabPlaceholder title={TABS[activeTab].label} day={TABS[activeTab].day} />
+            )}
           </div>
         </div>
       </div>
