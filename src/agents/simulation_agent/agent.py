@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Dict
 
 from src.agents.simulation_agent.engine import run_heuristic_fallback, run_monte_carlo
@@ -17,12 +16,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRIALS = 2000
 
 
-def _trial_count() -> int:
-    raw = os.environ.get("SIMULATION_TRIALS", str(DEFAULT_TRIALS))
-    try:
-        return max(100, int(raw))
-    except ValueError:
-        return DEFAULT_TRIALS
+def _trial_count(state: GlobalState) -> int:
+    if state.event_metadata is not None:
+        return state.event_metadata.simulation_trials
+    return DEFAULT_TRIALS
 
 
 def simulation_agent(state: GlobalState) -> Dict[str, Any]:
@@ -30,7 +27,7 @@ def simulation_agent(state: GlobalState) -> Dict[str, Any]:
     if state.active_record is None or state.config is None:
         raise ValueError("Active record and config are required for simulation.")
 
-    trials = _trial_count()
+    trials = _trial_count(state)
     seed = hash(
         (
             state.active_record.get("event_date"),

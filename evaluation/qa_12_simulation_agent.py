@@ -83,11 +83,12 @@ payload = {
     "shock_duration_days": 7,
     "recovery_window_days": 45,
     "synthetic_ratio": 0.0,
+    "simulation_trials": 300,
     "sku": row["sku"],
     "event_date": row["event_date"],
 }
 
-os.environ["SIMULATION_TRIALS"] = "300"
+os.environ.pop("SIMULATION_TRIALS", None)
 
 before_count = sqlite3.connect(DB_PATH).execute("SELECT COUNT(*) FROM simulation_runs").fetchone()[0]
 

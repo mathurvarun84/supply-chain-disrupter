@@ -11,6 +11,12 @@ class EventMetadata(BaseModel):
     shock_duration_days: int
     recovery_window_days: int
     synthetic_ratio: float
+    simulation_trials: int = Field(
+        default=2000,
+        ge=100,
+        le=10000,
+        description="Monte Carlo trial count for L6 impact simulation.",
+    )
 
 
 class NewsRiskSignal(BaseModel):

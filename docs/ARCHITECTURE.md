@@ -429,7 +429,8 @@ Flow:
 **Module:** `src/agents/simulation_agent/` (`agent.py`, `engine.py`, `priors.py`)
 
 L6 runs a **Monte Carlo discrete-time inventory simulation** (default 2,000 trials,
-configurable via `SIMULATION_TRIALS`). Each trial samples stochastic lead time,
+set per scenario in the Streamlit Scenario Analyzer form via `simulation_trials`).
+Each trial samples stochastic lead time,
 demand (optionally from L5 Prophet forecast), supplier reliability, and disruption
 duration, then simulates daily inventory balance over the scenario recovery window.
 

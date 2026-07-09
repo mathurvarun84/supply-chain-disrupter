@@ -198,6 +198,14 @@ def show_scenario_analyzer() -> None:
         recovery_window_days = st.number_input(
             "Recovery window (days)", min_value=1, max_value=180, value=60
         )
+        simulation_trials = st.number_input(
+            "Simulation trials",
+            min_value=100,
+            max_value=10000,
+            value=2000,
+            step=100,
+            help="Monte Carlo trials for impact ranges (P10/P50/P90). Higher = smoother bands, slower run.",
+        )
         submit = st.form_submit_button("Run scenario")
 
     if not submit:
@@ -214,6 +222,7 @@ def show_scenario_analyzer() -> None:
                     "shock_duration_days": shock_duration_days,
                     "recovery_window_days": recovery_window_days,
                     "synthetic_ratio": 0.0,
+                    "simulation_trials": int(simulation_trials),
                     "sku": selected["sku"],
                     "event_date": selected["event_date"],
                 }

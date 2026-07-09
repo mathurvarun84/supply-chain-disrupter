@@ -40,6 +40,7 @@ def _base_params(**overrides) -> SimulationParams:
 
 def _risk_state(**kwargs) -> GlobalState:
     active_extra = kwargs.pop("active_record", {})
+    sim_trials = kwargs.pop("simulation_trials", 500)
     risk = RiskClassificationResult(
         mode="live",
         composite_score=kwargs.pop("composite_score", 0.55),
@@ -63,6 +64,7 @@ def _risk_state(**kwargs) -> GlobalState:
             shock_duration_days=kwargs.pop("shock_duration_days", 5),
             recovery_window_days=kwargs.pop("recovery_window_days", 30),
             synthetic_ratio=0.0,
+            simulation_trials=sim_trials,
         ),
         config={
             "route_maps": {"JNPT": {"backup_route": "Cape of Good Hope"}},
@@ -118,15 +120,14 @@ def test_resolve_alternate_route_by_region():
 
 
 def test_simulation_agent_persistence(tmp_path, monkeypatch):
-  monkeypatch.setattr("src.agents.simulation_agent.agent._trial_count", lambda: 200)
-  monkeypatch.setattr("src.utils.db_utils.DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("src.utils.db_utils.DB_PATH", tmp_path / "test.db")
 
-  state = _risk_state()
-  with patch("src.agents.simulation_agent.agent.insert_simulation_run") as mock_insert:
-    result = simulation_agent(state)
-  assert result["simulation_result"].trials_run == 200
-  assert result["simulation_result"].stockout_probability_pct >= 0.0
-  mock_insert.assert_called_once()
+    state = _risk_state(simulation_trials=200)
+    with patch("src.agents.simulation_agent.agent.insert_simulation_run") as mock_insert:
+        result = simulation_agent(state)
+    assert result["simulation_result"].trials_run == 200
+    assert result["simulation_result"].stockout_probability_pct >= 0.0
+    mock_insert.assert_called_once()
 
 
 def test_simulation_schema_insert(tmp_path, monkeypatch):
@@ -171,6 +172,14 @@ def test_build_simulation_params_from_state():
     params = build_simulation_params(state, trials=100, seed=1)
   assert params.alternate_route == "Suez Canal"
   assert len(params.forecast_daily_demands) == 30
+
+
+def test_simulation_trials_from_event_metadata():
+    state = _risk_state(simulation_trials=350)
+    trials = __import__(
+        "src.agents.simulation_agent.agent", fromlist=["_trial_count"]
+    )._trial_count(state)
+    assert trials == 350
 
 
 def test_simulation_agent_missing_record_raises():
