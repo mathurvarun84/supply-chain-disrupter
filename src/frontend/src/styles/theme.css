@@ -162,6 +162,29 @@
   --radius-panel: var(--radius-panel);
   --radius-btn: var(--radius-btn);
   --radius-pill: var(--radius-pill);
+
+  /* Motion pass (Screens 1/2/6) — extends design.md §1.5's ping/pulse/
+     fadeInStagger token set. fadeInStagger itself was documented but never
+     wired anywhere pre-pass; it's defined here for the first time. */
+  --animate-slide-in-top: slideInTop 300ms ease-out both;
+  --animate-flash-highlight: flashHighlight 1200ms ease-out both;
+  --animate-fade-stagger: fadeInStagger 300ms ease-out both;
+}
+
+@keyframes slideInTop {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes flashHighlight {
+  0%   { background-color: var(--card); }
+  30%  { background-color: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  100% { background-color: var(--card); }
+}
+
+@keyframes fadeInStagger {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @layer base {

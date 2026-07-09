@@ -6,6 +6,8 @@ import {
 import { AgentNode } from "./components/AgentNode";
 import { TabPlaceholder } from "./components/TabPlaceholder";
 import { TabLiveFeed } from "./TabLiveFeed";
+import { TabRiskClassification } from "./TabRiskClassification";
+import { TabRagEval } from "./TabRagEval";
 import { usePipelineStatus } from "./hooks/usePipelineStatus";
 
 const TABS = [
@@ -125,6 +127,10 @@ export default function App() {
           <div className="flex-1 overflow-hidden bg-background">
             {activeTab === 0 ? (
               <TabLiveFeed onTabSwitch={setActiveTab} />
+            ) : activeTab === 1 ? (
+              <TabRiskClassification />
+            ) : activeTab === 5 ? (
+              <TabRagEval />
             ) : (
               <TabPlaceholder title={TABS[activeTab].label} day={TABS[activeTab].day} />
             )}

@@ -256,7 +256,10 @@ def insert_mitigation_action(
 
 
 def ensure_risk_classification_table() -> None:
-    """Create risk_classifications table if it doesn't exist."""
+    """Create risk_classifications table if it doesn't exist, and add
+    full_result_json to pre-existing tables that predate it (ALTER TABLE
+    is a no-op-safe upgrade path — CREATE TABLE IF NOT EXISTS alone would
+    not add a new column to an already-existing table on disk)."""
     with get_connection() as conn:
         conn.execute(
             """
@@ -275,10 +278,14 @@ def ensure_risk_classification_table() -> None:
                 escalated       INTEGER,
                 rag_citations   TEXT,
                 rationale       TEXT,
+                full_result_json TEXT,
                 run_ts          TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_classifications)")}
+        if "full_result_json" not in existing_cols:
+            conn.execute("ALTER TABLE risk_classifications ADD COLUMN full_result_json TEXT")
 
 
 def insert_risk_classification(
@@ -295,7 +302,15 @@ def insert_risk_classification(
     escalated: bool,
     rag_citations: List[str],
     rationale: str,
+    full_result_json: Optional[str] = None,
 ) -> None:
+    """Persist one L4 classification run. full_result_json, when provided,
+    is a serialized RiskClassificationResult (rule/distilbert/llm/judge
+    signals) so a later cache-hit read (fetch_risk_classification) can
+    return the complete ensemble detail instead of rule-signal-only —
+    see risk.py's _response_from_cached_row. Rows inserted before this
+    column existed simply have it NULL, and the reader falls back to the
+    rule-only view for those."""
     import json as _json
     ensure_risk_classification_table()
     execute_non_query(
@@ -303,8 +318,8 @@ def insert_risk_classification(
         INSERT INTO risk_classifications
           (order_id, mode, composite_score, geo_component, supply_component,
            freight_component, defect_component, duration_days, base_label,
-           final_label, escalated, rag_citations, rationale)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           final_label, escalated, rag_citations, rationale, full_result_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             order_id, mode, round(composite_score, 4),
@@ -312,8 +327,47 @@ def insert_risk_classification(
             round(freight_component, 4), round(defect_component, 4),
             duration_days, base_label, final_label,
             int(escalated), _json.dumps(rag_citations), rationale,
+            full_result_json,
         ),
     )
+
+
+def fetch_record_by_order_id(order_id: int) -> Optional[Dict[str, Any]]:
+    """Resolve an order_id to its most recent daily_records row — the
+    (event_date, port, sku) shape risk_classifier_agent's record dict
+    needs. Used by GET /api/risk-classification/{run_id} (Screen 2) to
+    turn the run_id (== order_id) path param into a record before
+    invoking the ensemble directly, without running the full LangGraph
+    pipeline."""
+    rows = execute_query(
+        "SELECT * FROM daily_records WHERE order_id = ? ORDER BY record_id DESC LIMIT 1",
+        (order_id,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def fetch_risk_classification(order_id: int) -> Optional[Dict[str, Any]]:
+    """Read back the most recently persisted ensemble result for an
+    order_id from risk_classifications. Returns None if this order has
+    never been classified — the caller (Screen 2's API handler) computes
+    it live in that case. Read counterpart to insert_risk_classification."""
+    rows = execute_query(
+        "SELECT * FROM risk_classifications WHERE order_id = ? ORDER BY id DESC LIMIT 1",
+        (order_id,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def fetch_latest_classified_order_id() -> Optional[int]:
+    """Return the order_id of the most recently persisted classification,
+    or the most recent daily_records order if none have been classified
+    yet. Backs GET /api/risk-classification/latest (Screen 2's default
+    view before a demo-scenario/record picker exists)."""
+    rows = execute_query("SELECT order_id FROM risk_classifications ORDER BY id DESC LIMIT 1")
+    if rows:
+        return int(rows[0]["order_id"])
+    rows = execute_query("SELECT order_id FROM daily_records ORDER BY record_id DESC LIMIT 1")
+    return int(rows[0]["order_id"]) if rows else None
 
 
 def fetch_scenario_options() -> List[Dict[str, Any]]:

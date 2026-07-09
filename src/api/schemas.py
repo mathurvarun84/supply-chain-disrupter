@@ -190,3 +190,4 @@ class GoldQARow(BaseModel):
     match: bool
     source_collection: Optional[str] = None
     source_chunk_id: Optional[str] = None
+    query_style: Literal["agent_pattern", "natural_question"] = "natural_question"

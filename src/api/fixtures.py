@@ -166,14 +166,59 @@ CORPUS = [
 ]
 
 GOLD_QA = [
+    # 60/40 agent_pattern/natural_question split (10/6) so the mix is
+    # visibly present in the Gold Dataset table, not a single example of
+    # each — agent_pattern rows mirror the terse internal RAG query
+    # strings from MITIGATION["rag_query_trace"]; natural_question rows
+    # are full English questions an evaluator would ask by hand.
     {"question": "Recovery timeline after major Taiwan earthquake for TSMC advanced node output?",
-     "ground_truth": "4–6 weeks for advanced nodes; 2–3 weeks for mature nodes (2016 precedent)", "match": True},
+     "ground_truth": "4–6 weeks for advanced nodes; 2–3 weeks for mature nodes (2016 precedent)", "match": True,
+     "source_collection": "historical_precedents", "query_style": "natural_question"},
     {"question": "Export control regulations affecting EUV equipment shipments to Taiwan?",
-     "ground_truth": "EAR-99 classification, BIS Entity List restrictions, CHIPS Act Section 22 provisions", "match": True},
+     "ground_truth": "EAR-99 classification, BIS Entity List restrictions, CHIPS Act Section 22 provisions", "match": True,
+     "source_collection": "export_control_corpus", "query_style": "natural_question"},
     {"question": "PLI-certified Indian substrate suppliers with emergency capacity?",
-     "ground_truth": "Kaynes Technology (Mysuru), Tata Electronics (Dholera), SPEL Semiconductor (Chennai)", "match": True},
+     "ground_truth": "Kaynes Technology (Mysuru), Tata Electronics (Dholera), SPEL Semiconductor (Chennai)", "match": True,
+     "source_collection": "india_sourcing_corpus", "query_style": "natural_question"},
     {"question": "Red Sea crisis impact on Rotterdam port throughput?",
-     "ground_truth": "+14 day avg transit via Cape of Good Hope; Suez Canal volume −42%", "match": False},
+     "ground_truth": "+14 day avg transit via Cape of Good Hope; Suez Canal volume −42%", "match": False,
+     "source_collection": "historical_precedents", "query_style": "natural_question"},
+    {"question": "How long did DRAM spot prices stay elevated after the 2016 Taiwan quake?",
+     "ground_truth": "DRAM spot prices spiked 15% within 72h and normalized over ~5 weeks", "match": True,
+     "source_collection": "historical_precedents", "query_style": "natural_question"},
+    {"question": "Which agency administers the BIS Entity List restrictions cited for chip tooling?",
+     "ground_truth": "U.S. Department of Commerce, Bureau of Industry and Security (BIS)", "match": False,
+     "source_collection": "export_control_corpus", "query_style": "natural_question"},
+    {"question": "historical_disruption_lookup: Taiwan earthquake M7.2 recovery_timeline advanced_node",
+     "ground_truth": "4–6 weeks advanced nodes / 2–3 weeks mature nodes; DRAM spot +15% within 72h (2016 precedent)",
+     "match": True, "source_collection": "historical_precedents", "query_style": "agent_pattern"},
+    {"question": "export_control_check: EUV_equipment shipment_route=Taiwan export_control_norm>0.50",
+     "ground_truth": "EAR-99 classification; BIS Entity List; CHIPS Act Section 22 provisions apply",
+     "match": True, "source_collection": "export_control_corpus", "query_style": "agent_pattern"},
+    {"question": "india_sourcing_query: wafer_substrate geo_component>0.40 asia_hub_affected=True",
+     "ground_truth": "Kaynes Technology (Mysuru) 45K wafer/mo, Tata Electronics (Dholera) 20K wafer/mo, both PLI-certified",
+     "match": True, "source_collection": "india_sourcing_corpus", "query_style": "agent_pattern"},
+    {"question": "historical_disruption_lookup: Red Sea Houthi_attacks freight_reroute Suez_Canal",
+     "ground_truth": "+14 day avg transit via Cape of Good Hope; Suez Canal volume −42%",
+     "match": False, "source_collection": "historical_precedents", "query_style": "agent_pattern"},
+    {"question": "export_control_check: EAR-99 tooling_category=lithography destination=Taiwan",
+     "ground_truth": "EAR-99 classification, BIS Entity List restrictions, CHIPS Act Section 22 provisions",
+     "match": True, "source_collection": "export_control_corpus", "query_style": "agent_pattern"},
+    {"question": "india_sourcing_query: substrate_supplier PLI_scheme certified_capacity>=20000",
+     "ground_truth": "SPEL Semiconductor (Chennai) and Tata Electronics (Dholera) both PLI Semiconductor Scheme certified",
+     "match": True, "source_collection": "india_sourcing_corpus", "query_style": "agent_pattern"},
+    {"question": "historical_disruption_lookup: South_Korea contingency_sourcing Taiwan_quake precedent",
+     "ground_truth": "South Korean chipmakers activated substrate contingency sourcing within 48h of prior Taiwan quakes",
+     "match": True, "source_collection": "historical_precedents", "query_style": "agent_pattern"},
+    {"question": "export_control_check: freight_route=Rotterdam export_control_norm<0.50",
+     "ground_truth": "No export control restriction applies below the 0.50 norm threshold for Rotterdam-bound freight",
+     "match": False, "source_collection": "export_control_corpus", "query_style": "agent_pattern"},
+    {"question": "india_sourcing_query: wafer_substrate lead_time<=72h region=Karnataka",
+     "ground_truth": "Kaynes Technology (Mysuru, Karnataka) — 45K wafer/mo, 72h confirmed leadtime",
+     "match": True, "source_collection": "india_sourcing_corpus", "query_style": "agent_pattern"},
+    {"question": "What safety-stock buffer policy applies during a demand trough for Laptops/Phones?",
+     "ground_truth": "Liquidate up to 30% of safety stock while preserving a 15% minimum buffer per InventoryPolicy_v4",
+     "match": True, "source_collection": "historical_precedents", "query_style": "natural_question"},
 ]
 
 RISK_CLASSIFICATION = {

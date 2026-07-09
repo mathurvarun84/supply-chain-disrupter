@@ -69,7 +69,8 @@ function WeatherCard({ hub }: { hub: WeatherHub }) {
           {HUB_FLAGS[hub.hub_city] ?? ""} {hub.hub_city}
         </span>
         {hub.is_trigger_hub && (
-          <span className="text-[9px] font-mono text-risk-critical border border-risk-critical/30 px-1 rounded">
+          <span className="flex items-center gap-1 text-[9px] font-mono text-risk-critical border border-risk-critical/30 px-1 rounded">
+            <span className="w-1.5 h-1.5 rounded-full bg-risk-critical animate-ping motion-reduce:animate-none inline-block" />
             TRIGGER
           </span>
         )}

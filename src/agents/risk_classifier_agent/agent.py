@@ -14,6 +14,7 @@ Two operating modes:
   LIVE   — new/injected order; recompute composite using the spec formula, write results back.
 """
 
+import json
 import logging
 import sqlite3
 from functools import lru_cache
@@ -531,6 +532,10 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
     logger.info("L4: %s", ensemble_summary)
 
     # ── Persist classification audit record ───────────────────────────────────
+    # full_result_json carries the complete ensemble (rule + distilbert + llm +
+    # judge) so a later cache-hit read for this order_id can still render the
+    # full 3-signal ensemble, not just the rule-based column — see
+    # src/api/routers/risk.py::_response_from_cached_row.
     insert_risk_classification(
         order_id=order_id,
         mode=mode,
@@ -545,6 +550,14 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
         escalated=escalated,
         rag_citations=rag_citations,
         rationale=rationale,
+        full_result_json=json.dumps(
+            {
+                "rule_signal": rule_signal.model_dump(),
+                "distilbert_signal": distilbert_signal.model_dump() if distilbert_signal else None,
+                "llm_signal": llm_signal.model_dump() if llm_signal else None,
+                "judge_verdict": judge_verdict.model_dump() if judge_verdict else None,
+            }
+        ),
     )
 
     # Live mode: propagate freshly computed score/label back to lite_master.

@@ -11,9 +11,70 @@
  * Polls every 15s; "Refresh Live Data" (RefreshControl.tsx) triggers a fresh
  * ingestion batch. Layout/classNames copied from the original mockup body in
  * _reference/App.mockup.tsx — do not restyle, only the data source changed.
+ * The headline list also auto-scrolls on a slow continuous loop (like a
+ * news ticker) so the panel visibly "runs" on its own; pauses on
+ * hover/touch and is skipped entirely under prefers-reduced-motion.
  */
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { useLiveFeedNews } from "../../hooks/useLiveFeed";
 import type { NewsHeadline } from "../../types/liveFeed";
+import { prefersReducedMotion } from "../../utils/animation";
+
+// Ticker-like auto-scroll pace so the list reads as "always running" (per
+// user request — like a live news ticker). Bumped up from an initial 16 —
+// that was imperceptible against typical panel content height; this is
+// still slow enough to read headlines mid-scroll, but visibly moving.
+const AUTO_SCROLL_PX_PER_SEC = 35;
+// How long a hover/touch pause holds before the ticker resumes.
+const RESUME_DELAY_MS = 2500;
+
+// Continuously scrolls `el` downward, looping back to the top at the end.
+// Pauses while `pausedRef.current` is true (hover/touch) and is a no-op
+// under reduced motion. Re-measures scrollHeight every frame rather than
+// once, so it keeps working across React Query's 15s data refreshes
+// without needing to be restarted.
+function useAutoScrollTicker(pausedRef: RefObject<boolean>) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (prefersReducedMotion()) return;
+    const el = containerRef.current;
+    if (!el) return;
+
+    let raf = 0;
+    let last = performance.now();
+
+    const tick = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      if (!pausedRef.current) {
+        const maxScroll = el.scrollHeight - el.clientHeight;
+        if (maxScroll > 0) {
+          const next = el.scrollTop + AUTO_SCROLL_PX_PER_SEC * dt;
+          el.scrollTop = next >= maxScroll ? 0 : next;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return containerRef;
+}
+
+// News RSS refetches every 15s (see useLiveFeedNews in hooks/useLiveFeed.ts,
+// which this presentation-only pass must not touch) — kept in lockstep with
+// that literal by hand; update both if the poll interval ever changes.
+const NEWS_POLL_MS = 15_000;
+
+// NewsHeadline carries no stable id from the API, so "genuinely new
+// headline" is approximated with a composite of fields unlikely to repeat
+// across a poll window.
+function newsItemKey(item: NewsHeadline): string {
+  return `${item.headline}|${item.published_at ?? ""}|${item.source_feed ?? ""}`;
+}
 
 // Mockup grouped news by query type (hub city / hub country / supplier
 // country); the real rows carry that same distinction via which of the
@@ -54,9 +115,61 @@ function timeAgo(publishedAt: string | null): string {
   return `${hours}h ${minutes % 60}m ago`;
 }
 
+// Thin countdown bar in the panel header — purely visual, driven by a local
+// tick against dataUpdatedAt, never causes an early/duplicate fetch.
+function RefreshCountdown({ dataUpdatedAt }: { dataUpdatedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, []);
+
+  const elapsed = dataUpdatedAt ? now - dataUpdatedAt : 0;
+  const remainingFrac = Math.max(0, Math.min(1, 1 - elapsed / NEWS_POLL_MS));
+
+  return (
+    <div
+      className="w-10 h-1 rounded-full overflow-hidden bg-border shrink-0"
+      title="Next refresh countdown"
+    >
+      <div
+        className="h-full rounded-full bg-primary transition-[width] duration-300 ease-linear motion-reduce:transition-none"
+        style={{ width: `${remainingFrac * 100}%` }}
+      />
+    </div>
+  );
+}
+
 export function NewsPanel() {
-  const { data, isLoading, isError } = useLiveFeedNews();
+  const { data, isLoading, isError, dataUpdatedAt } = useLiveFeedNews();
   const groups = data ? groupByQueryType(data.items) : [];
+
+  const seenIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!data) return;
+    for (const item of data.items) seenIds.current.add(newsItemKey(item));
+  }, [data]);
+
+  // Ticker pauses on hover (desktop) or touch (mobile) so a reader isn't
+  // fighting the scroll to read a headline, then resumes on its own.
+  const pausedRef = useRef(false);
+  const resumeTimer = useRef<number | undefined>(undefined);
+  const pause = () => {
+    window.clearTimeout(resumeTimer.current);
+    pausedRef.current = true;
+  };
+  const resumeNow = () => {
+    window.clearTimeout(resumeTimer.current);
+    pausedRef.current = false;
+  };
+  const resumeAfterDelay = () => {
+    window.clearTimeout(resumeTimer.current);
+    resumeTimer.current = window.setTimeout(() => {
+      pausedRef.current = false;
+    }, RESUME_DELAY_MS);
+  };
+  const scrollRef = useAutoScrollTicker(pausedRef);
 
   return (
     <div className="flex flex-col overflow-hidden rounded-lg bg-card border border-border">
@@ -64,15 +177,29 @@ export function NewsPanel() {
         <span className="text-xs font-semibold text-foreground">
           News RSS — 14 parallel queries
         </span>
-        {data && (
-          <span className="text-[10px] font-mono text-muted-foreground">
-            {data.count} new · updated {timeAgo(data.fetched_at)} · run_id{" "}
-            {data.run_id?.slice(0, 8) ?? "—"}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {data && <RefreshCountdown dataUpdatedAt={dataUpdatedAt} />}
+          {data && (
+            <span className="text-[10px] font-mono text-muted-foreground">
+              {data.count} new · updated {timeAgo(data.fetched_at)} · run_id{" "}
+              {data.run_id?.slice(0, 8) ?? "—"}
+            </span>
+          )}
+        </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-3">
+      <div
+        ref={scrollRef}
+        onMouseEnter={pause}
+        onMouseLeave={resumeNow}
+        onTouchStart={pause}
+        onTouchEnd={resumeAfterDelay}
+        onWheel={() => {
+          pause();
+          resumeAfterDelay();
+        }}
+        className="flex-1 overflow-y-auto p-2 space-y-3"
+      >
         {isLoading && (
           <div className="text-xs text-muted-foreground px-1">Loading news…</div>
         )}
@@ -92,10 +219,15 @@ export function NewsPanel() {
             <div className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider mb-1.5 px-1">
               {g.group}
             </div>
-            {g.items.map((item, i) => (
+            {g.items.map((item) => {
+              const key = newsItemKey(item);
+              const isNew = !seenIds.current.has(key);
+              return (
               <div
-                key={i}
-                className="mb-1.5 p-2 rounded bg-background border border-border"
+                key={key}
+                className={`mb-1.5 p-2 rounded bg-background border border-border ${
+                  isNew ? "animate-slide-in-top animate-flash-highlight motion-reduce:animate-none" : ""
+                }`}
               >
                 <div className="text-[11px] text-foreground leading-snug mb-1.5">
                   {item.headline}
@@ -117,7 +249,8 @@ export function NewsPanel() {
                   </span>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         ))}
       </div>

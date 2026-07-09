@@ -46,6 +46,10 @@ dist/
 .vscode/
 .idea/
 
+# Agent tooling
+.claude/
+.kilo/
+
 # OS files
 .DS_Store
 Thumbs.db

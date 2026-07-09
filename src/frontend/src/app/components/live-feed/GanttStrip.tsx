@@ -29,14 +29,14 @@ export function GanttStrip() {
           {bars.map((row) => (
             <div
               key={row.id}
-              className={`flex items-center gap-2 ${row.source === "stub" ? "opacity-60" : ""}`}
+              className={`flex items-center gap-2 transition-opacity duration-300 motion-reduce:transition-none ${row.source === "stub" ? "opacity-60" : ""}`}
             >
               <span className="text-[9px] font-mono text-muted-foreground w-4 shrink-0">
                 {row.id}
               </span>
               <div className="flex-1 relative h-3.5 rounded overflow-hidden bg-background">
                 <div
-                  className="absolute top-0 h-full rounded flex items-center px-1 text-[9px] font-mono"
+                  className="absolute top-0 h-full rounded flex items-center px-1 text-[9px] font-mono transition-all duration-300 ease-out motion-reduce:transition-none"
                   style={{
                     left: totalDuration > 0 ? `${(row.start / totalDuration) * 100}%` : "0%",
                     width: totalDuration > 0 ? `${(row.dur / totalDuration) * 100}%` : "0%",

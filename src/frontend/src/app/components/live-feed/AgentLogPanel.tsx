@@ -9,13 +9,26 @@
  */
 import { useRef, useEffect } from "react";
 import { useLiveFeedLogs } from "../../hooks/useLiveFeed";
+import { prefersReducedMotion } from "../../utils/animation";
 
 export function AgentLogPanel({ onTabSwitch }: { onTabSwitch: (t: number) => void }) {
   const logRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  // Log lines only ever append (see header comment) — anything past the
+  // previously-seen length is a genuinely new line, not a background
+  // refetch echoing the same data.
+  const seenCount = useRef(0);
   const { data, isLoading, isError } = useLiveFeedLogs();
 
   useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    bottomRef.current?.scrollIntoView({
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+      block: "end",
+    });
+  }, [data]);
+
+  useEffect(() => {
+    if (data) seenCount.current = data.lines.length;
   }, [data]);
 
   return (
@@ -43,7 +56,7 @@ export function AgentLogPanel({ onTabSwitch }: { onTabSwitch: (t: number) => voi
             onClick={() => onTabSwitch(line.tab)}
             className={`flex gap-2 px-1 py-0.5 rounded cursor-pointer hover:bg-secondary/40 transition-colors ${
               line.source === "stub" ? "opacity-60" : ""
-            }`}
+            } ${i >= seenCount.current ? "animate-slide-in-top motion-reduce:animate-none" : ""}`}
           >
             <span className="shrink-0 font-bold text-status-complete">[{line.level}]</span>
             <span className="text-muted-strong">{line.text}</span>
@@ -55,6 +68,7 @@ export function AgentLogPanel({ onTabSwitch }: { onTabSwitch: (t: number) => voi
           </div>
         ))}
         <div className="text-border2 animate-pulse px-1 mt-1">▊</div>
+        <div ref={bottomRef} />
       </div>
     </div>
   );
