@@ -143,12 +143,16 @@ class Signal3Capture:
         self._orig_call_llm = llm_signal_mod.call_openai_structured
 
         def retrieve_wrapper(*args, **kwargs):
+            # Runs the REAL retrieval call unmodified, then records (query, hits) —
+            # this is Signal 3's own two-stage retrieval, not _gather_rag_citations's.
             hits = self._orig_retrieve(*args, **kwargs)
             query = kwargs.get("query", args[0] if args else "")
             self.retrieval_calls.append({"query": query, "hits": list(hits or [])})
             return hits
 
         def call_llm_wrapper(*args, **kwargs):
+            # Only llm_signal.py's call_openai_structured is patched (not the module-
+            # wide one), so this captures exactly Signal 3's LLMSignal result.
             result = self._orig_call_llm(*args, **kwargs)
             self.llm_signal_result = result
             return result
@@ -203,6 +207,10 @@ def run_order_and_capture(record: dict) -> dict:
     capture = Signal3Capture()
     try:
         with capture:
+            # insert_risk_classification / update_risk_label are patched out so this
+            # replay run never writes to outputs/supply_chain.db. run_judge is patched
+            # to a no-op to skip an unrelated GPT-4o call — see module docstring for
+            # why disabling the Judge doesn't affect what's being scored here.
             with patch("src.agents.risk_classifier_agent.agent.insert_risk_classification"):
                 with patch("src.agents.risk_classifier_agent.agent.update_risk_label"):
                     with patch("src.agents.risk_classifier_agent.agent.run_judge", return_value=None):
@@ -215,6 +223,8 @@ def run_order_and_capture(record: dict) -> dict:
     if llm_signal is None:
         return {**base, "question": "", "contexts": [], "answer": None, "evaluated": False, "skipped_reason": "llm_signal_none"}
 
+    # Signal 3's prompt is built from a single retrieve_and_rerank() call, so the
+    # first (only) captured query is the question; flatten all its hit texts as contexts.
     question = capture.retrieval_calls[0]["query"] if capture.retrieval_calls else ""
     contexts = [
         hit.get("text", "")
@@ -306,6 +316,7 @@ def _group_by(rows: List[dict], key: str) -> Dict[str, dict]:
 
 
 def flag_weak(by_bucket: Dict[str, dict]) -> List[dict]:
+    """Same worst-gap-first flagging as run_evaluation.flag_weak_collections, keyed by delivery_status bucket instead of RAG collection."""
     flagged = []
     for bucket, scores in by_bucket.items():
         for metric, target in L4_TARGET_METRICS.items():
