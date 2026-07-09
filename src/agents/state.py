@@ -34,6 +34,17 @@ class SimulationResult(BaseModel):
     stockout_probability_pct: float
     expected_inventory_gap_pct: float
     alternate_route: Optional[str]
+    stockout_probability_p10: Optional[float] = None
+    stockout_probability_p90: Optional[float] = None
+    days_to_stockout_p50: Optional[float] = None
+    days_to_stockout_p10: Optional[float] = None
+    days_to_stockout_p90: Optional[float] = None
+    revenue_impact_usd_p50: Optional[float] = None
+    revenue_impact_usd_p10: Optional[float] = None
+    revenue_impact_usd_p90: Optional[float] = None
+    trials_run: int = 0
+    model_version: str = "mc_v1"
+    revenue_impact_samples: List[float] = Field(default_factory=list)
 
 
 class MitigationAction(BaseModel):

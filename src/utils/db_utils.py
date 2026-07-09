@@ -43,7 +43,7 @@ def execute_many(query: str, params_list: List[Tuple]) -> int:
 
 
 def ensure_schema() -> None:
-    """Create only the writable agent-output table.
+    """Create only the writable agent-output tables.
 
     The complete source schema is created by etl_loader.load_excel_into_sqlite().
     """
@@ -62,6 +62,7 @@ def ensure_schema() -> None:
             )
             """
         )
+    ensure_simulation_schema()
 
 
 def ensure_ingestion_schema() -> None:
@@ -253,6 +254,117 @@ def insert_mitigation_action(
         """,
         (event_date, port, sku, risk_label, recommendation, cost_delta),
     )
+
+
+def ensure_simulation_schema() -> None:
+    """Create simulation_runs audit table."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS simulation_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_date TEXT,
+                port TEXT,
+                sku TEXT,
+                disruption_type TEXT,
+                risk_label TEXT,
+                trials_run INTEGER,
+                stockout_p10 REAL,
+                stockout_p50 REAL,
+                stockout_p90 REAL,
+                revenue_p10_usd REAL,
+                revenue_p50_usd REAL,
+                revenue_p90_usd REAL,
+                days_to_stockout_p50 REAL,
+                alternate_route TEXT,
+                model_version TEXT,
+                payload_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+
+def insert_simulation_run(
+    event_date: str,
+    port: str,
+    sku: str,
+    disruption_type: str,
+    risk_label: str,
+    result: Any,
+    payload_json: str,
+) -> None:
+    ensure_simulation_schema()
+    execute_non_query(
+        """
+        INSERT INTO simulation_runs (
+            event_date, port, sku, disruption_type, risk_label, trials_run,
+            stockout_p10, stockout_p50, stockout_p90,
+            revenue_p10_usd, revenue_p50_usd, revenue_p90_usd,
+            days_to_stockout_p50, alternate_route, model_version, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_date,
+            port,
+            sku,
+            disruption_type,
+            risk_label,
+            result.trials_run,
+            result.stockout_probability_p10,
+            result.stockout_probability_pct,
+            result.stockout_probability_p90,
+            result.revenue_impact_usd_p10,
+            result.revenue_impact_usd_p50,
+            result.revenue_impact_usd_p90,
+            result.days_to_stockout_p50,
+            result.alternate_route,
+            result.model_version,
+            payload_json,
+        ),
+    )
+
+
+def fetch_ops_kpi_priors(sku: str, region: str) -> Optional[Dict[str, float]]:
+    """Return mean lead-time and demand variation priors from ops_kpi (parameterization only)."""
+    try:
+        rows = execute_query(
+            """
+            SELECT
+                AVG(demand_actual) AS mean_demand,
+                AVG(lead_time_baseline_days) AS mean_lead_time,
+                AVG(lead_time_after_days - lead_time_baseline_days) AS mean_lead_time_inflation,
+                AVG(ABS(demand_actual - forecast_baseline) / NULLIF(forecast_baseline, 0)) AS demand_cv
+            FROM ops_kpi
+            WHERE region = ?
+              AND (sku_id = ? OR ? = '')
+            """,
+            (region, sku, sku),
+        )
+    except RuntimeError:
+        return None
+    if not rows or rows[0]["mean_demand"] is None:
+        rows = execute_query(
+            """
+            SELECT
+                AVG(demand_actual) AS mean_demand,
+                AVG(lead_time_baseline_days) AS mean_lead_time,
+                AVG(lead_time_after_days - lead_time_baseline_days) AS mean_lead_time_inflation,
+                AVG(ABS(demand_actual - forecast_baseline) / NULLIF(forecast_baseline, 0)) AS demand_cv
+            FROM ops_kpi
+            WHERE region = ?
+            """,
+            (region,),
+        )
+    if not rows or rows[0]["mean_demand"] is None:
+        return None
+    row = dict(rows[0])
+    return {
+        "mean_demand": float(row["mean_demand"] or 0.0),
+        "mean_lead_time": float(row["mean_lead_time"] or 0.0),
+        "mean_lead_time_inflation": float(row["mean_lead_time_inflation"] or 0.0),
+        "demand_cv": float(row["demand_cv"] or 0.15),
+    }
 
 
 def ensure_risk_classification_table() -> None:

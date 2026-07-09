@@ -8,10 +8,10 @@ from src.agents.data_ingestion.agent import data_ingestion_agent
 from src.agents.mitigation_agent import mitigation_recommendation_agent
 from src.agents.news_agent.agent import news_event_analysis_agent
 from src.agents.risk_classifier_agent.agent import risk_classifier_agent
-from src.agents.state import ForecastResult, GlobalState, SimulationResult
+from src.agents.simulation_agent import simulation_agent
+from src.agents.state import ForecastResult, GlobalState
 from src.agents.weather_agent.agent import weather_risk_monitoring_agent
 from src.utils.db_utils import fetch_time_series
-from src.utils.yaml_utils import get_route_map
 
 logger = logging.getLogger(__name__)
 
@@ -71,36 +71,6 @@ def demand_forecasting_agent(state: GlobalState) -> Dict[str, Any]:
             expected_drop_pct=round(expected_drop * 100.0, 2),
         ),
         "agent_logs": state.agent_logs + ["L5: Demand forecasting completed."],
-    }
-
-
-def simulation_agent(state: GlobalState) -> Dict[str, Any]:
-    """L6 - Monte Carlo stockout simulation (optional)."""
-    if state.active_record is None or state.config is None:
-        raise ValueError("Active record and config are required for simulation.")
-    current_inventory = float(state.active_record.get("inventory_level", 0.0))
-    incoming = float(state.active_record.get("incoming_supply", 0.0))
-    lead_time = float(state.active_record.get("lead_time_days", 1.0))
-    alt_route = get_route_map(state.config, state.active_record["port"]).get(
-        "backup_route", "Cape of Good Hope"
-    )
-    stockout_probability = min(
-        100.0,
-        max(
-            0.0,
-            (state.risk_score_composite or 0.0) * 100.0
-            + (1.0 - (current_inventory / (incoming + 1.0))) * 25.0
-            + (lead_time / 30.0) * 25.0,
-        ),
-    )
-    expected_gap = max(0.0, 100.0 - (current_inventory / (incoming + 1.0)) * 100.0)
-    return {
-        "simulation_result": SimulationResult(
-            stockout_probability_pct=round(stockout_probability, 2),
-            expected_inventory_gap_pct=round(expected_gap, 2),
-            alternate_route=alt_route,
-        ),
-        "agent_logs": state.agent_logs + ["L6: Simulation completed."],
     }
 
 

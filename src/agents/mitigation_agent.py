@@ -15,32 +15,60 @@ from src.utils.db_utils import insert_mitigation_action
 
 logger = logging.getLogger(__name__)
 
+TAIL_RISK_P90_THRESHOLD = 60.0
+
 
 def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
     if state.risk_label is None:
         raise ValueError("Risk label is required for mitigation — run risk_classifier_agent first.")
 
     record = state.active_record or {}
+    sim = state.simulation_result
 
-    stockout = state.simulation_result.stockout_probability_pct if state.simulation_result else None
+    stockout_p50 = sim.stockout_probability_pct if sim else None
+    stockout_p90 = sim.stockout_probability_p90 if sim else None
+    revenue_p50 = sim.revenue_impact_usd_p50 if sim else None
     forecast_drop = state.forecast_result.expected_drop_pct if state.forecast_result else None
     alt_route = (
-        state.simulation_result.alternate_route
-        if state.simulation_result
-        else "the configured backup route"
+        sim.alternate_route if sim else "the configured backup route"
     ) or "the configured backup route"
 
-    stockout_note = f"{stockout:.1f}%" if stockout is not None else "unknown (simulation not run)"
+    if stockout_p50 is not None and stockout_p90 is not None:
+        stockout_note = f"P50 {stockout_p50:.1f}% / P90 {stockout_p90:.1f}%"
+        stockout_rec = (
+            f"Raise safety stock — stockout severity range: {stockout_note}. "
+            f"{'Prioritize buffer inventory: P90 exceeds 40%.' if stockout_p90 > 40 else 'Monitor weekly fill rates.'}"
+        )
+    else:
+        stockout_note = "unknown (simulation not run)"
+        stockout_rec = f"Raise safety stock for the affected product — stockout estimate: {stockout_note}."
+
+    if revenue_p50 is not None:
+        revenue_note = f"${revenue_p50:,.0f}"
+    else:
+        revenue_note = "unknown (simulation not run)"
+
     forecast_note = f"{forecast_drop:.1f}%" if forecast_drop is not None else "unknown (forecast not run)"
 
     recommendations = [
-        f"Raise safety stock for the affected product — stockout estimate: {stockout_note}.",
+        stockout_rec,
         f"Prepare diversion through {alt_route} and confirm carrier capacity.",
-        f"Review alternate suppliers and align purchase orders to forecast variance: {forecast_note}.",
+        f"Review alternate suppliers — forecast variance: {forecast_note}; estimated revenue at risk (P50): {revenue_note}.",
     ]
+
+    urgency = "HIGH"
+    if state.risk_label == "CRITICAL":
+        urgency = "CRITICAL"
+    elif stockout_p90 is not None and stockout_p90 > TAIL_RISK_P90_THRESHOLD:
+        urgency = "CRITICAL"
+    elif state.risk_label in ("HIGH", "CRITICAL"):
+        urgency = "HIGH"
+    else:
+        urgency = "MODERATE"
+
     cost_delta = (
         "High: expedite critical inventory and activate alternate sourcing."
-        if state.risk_label == "CRITICAL"
+        if urgency == "CRITICAL"
         else "Moderate: reserve backup logistics and inventory capacity."
     )
 
@@ -51,6 +79,7 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
         ),
         recommendations=recommendations,
         cost_delta=cost_delta,
+        urgency=urgency,
     )
 
     insert_mitigation_action(

@@ -36,3 +36,23 @@ route_maps:
     backup_route: "Suez Canal"
   Pipavav:
     backup_route: "Cape of Good Hope"
+
+region_route_maps:
+  Eastern Asia:
+    backup_route: "Suez Canal"
+  Southeast Asia:
+    backup_route: "Suez Canal"
+  Western Europe:
+    backup_route: "Cape of Good Hope"
+  Northern Europe:
+    backup_route: "Cape of Good Hope"
+  North America:
+    backup_route: "Panama Canal"
+  South America:
+    backup_route: "Cape of Good Hope"
+  Middle East:
+    backup_route: "Suez Canal"
+  Africa:
+    backup_route: "Cape of Good Hope"
+  Oceania:
+    backup_route: "Suez Canal"

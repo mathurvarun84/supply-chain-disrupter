@@ -10,6 +10,55 @@ from src.utils.openai_utils import has_openai_api_key
 from src.rag.utils import query_chroma_rag
 
 
+def _render_impact_simulation(result) -> None:
+    """Render Monte Carlo impact ranges from L6 simulation_result."""
+    sim = result.simulation_result
+    if sim is None:
+        return
+
+    st.subheader("Impact Simulation")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Stockout Severity P10", f"{sim.stockout_probability_p10:.1f}%")
+    c2.metric("Stockout Severity P50", f"{sim.stockout_probability_pct:.1f}%")
+    c3.metric("Stockout Severity P90", f"{sim.stockout_probability_p90:.1f}%")
+
+    r1, r2, r3 = st.columns(3)
+    if sim.revenue_impact_usd_p10 is not None:
+        r1.metric("Revenue at Risk P10", f"${sim.revenue_impact_usd_p10:,.0f}")
+    if sim.revenue_impact_usd_p50 is not None:
+        r2.metric("Revenue at Risk P50", f"${sim.revenue_impact_usd_p50:,.0f}")
+    if sim.revenue_impact_usd_p90 is not None:
+        r3.metric("Revenue at Risk P90", f"${sim.revenue_impact_usd_p90:,.0f}")
+
+    if sim.days_to_stockout_p50 is not None:
+        d1, d2, d3 = st.columns(3)
+        if sim.days_to_stockout_p10 is not None:
+            d1.metric("Days to Stockout P10", f"{sim.days_to_stockout_p10:.0f}")
+        d2.metric("Days to Stockout P50", f"{sim.days_to_stockout_p50:.0f}")
+        if sim.days_to_stockout_p90 is not None:
+            d3.metric("Days to Stockout P90", f"{sim.days_to_stockout_p90:.0f}")
+
+    st.caption(
+        f"Alternate route: {sim.alternate_route} · "
+        f"Trials: {sim.trials_run:,} · Model: {sim.model_version}"
+    )
+
+    if sim.revenue_impact_samples:
+        try:
+            import matplotlib.pyplot as plt
+
+            with st.expander("Revenue impact distribution"):
+                fig, ax = plt.subplots(figsize=(8, 3))
+                ax.hist(sim.revenue_impact_samples, bins=min(20, len(sim.revenue_impact_samples)))
+                ax.set_xlabel("Revenue impact (USD)")
+                ax.set_ylabel("Trial count")
+                ax.set_title("Monte Carlo revenue-at-risk samples")
+                st.pyplot(fig)
+                plt.close(fig)
+        except ImportError:
+            pass
+
+
 def _render_ensemble_signals(rc: RiskClassificationResult) -> None:
     """Render three-signal ensemble breakdown and judge verdict panel."""
     st.markdown("---")
@@ -277,7 +326,9 @@ def show_scenario_analyzer() -> None:
         s2.metric("Forecast Demand Drop", f"{result.forecast_result.expected_drop_pct:.1f}%")
     if result.simulation_result:
         s3.metric("Stockout Probability", f"{result.simulation_result.stockout_probability_pct:.1f}%")
-        st.caption(f"Alternate route: {result.simulation_result.alternate_route}")
+
+    st.divider()
+    _render_impact_simulation(result)
 
     st.divider()
 
