@@ -5,18 +5,20 @@ Five pipeline stages per row:
   1. Schema    — required fields, type coercion; discard on failure
   2. Range     — clamp to normalization bounds with warning
   3. Dedup     — article_hash check for news; UNIQUE enforced at DB level
-  4. Outlier   — Z-score advisory (log, never block)
-  5. Conflict  — live_enrichment shift detection (log only)
+  4. Outlier   — Z-score check; rows with |z| > 3.0 are quarantined, not persisted
+  5. Conflict  — live_enrichment shift detection; conflicting fields are held back
+     (previous value kept) rather than overwritten, and the row is quarantined
 """
 
 import email.utils
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.utils.db_utils import execute_query
+from src.utils.db_utils import execute_query, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -120,39 +122,99 @@ class DataValidator:
             logger.warning("Clamped %s: %s → %s (bounds [%s, %s])", field, value, clamped, lo, hi)
         return clamped
 
+    # ── Quarantine ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def quarantine_row(
+        source: str,
+        target_table: str,
+        field: str,
+        value: Optional[float],
+        reason: str,
+        row: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+    ) -> None:
+        """Persist a rejected row to ingestion_quarantine instead of its target table."""
+        try:
+            with get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO ingestion_quarantine
+                    (quarantined_at_utc, run_id, source, target_table, field, value, reason, row_json)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        datetime.now(timezone.utc).isoformat(), run_id, source, target_table,
+                        field, value, reason, json.dumps(row, default=str) if row else None,
+                    ),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("Failed to quarantine row for %s.%s: %s", target_table, field, exc)
+
     # ── Outlier detection ─────────────────────────────────────────────────────
 
     @staticmethod
-    def check_outlier_zscore(
-        value: float, field: str, table: str, window: int = 90
-    ) -> bool:
-        """Advisory Z-score check. Returns True if |z| > 3.0. Never blocks ingestion."""
+    def get_zscore_baseline(field: str, table: str, window: int = 90) -> Optional[Tuple[float, float]]:
+        """
+        Snapshot (mean, std) from the most recent `window` historical values,
+        queried once. Callers persisting many rows in one connector run must
+        take this snapshot BEFORE their insert loop and reuse it for every row
+        — re-querying per-row would fold each row just inserted into the next
+        row's baseline, letting the mean drift mid-batch and causing a cascade
+        of false-positive outliers on large backfills (e.g. FRED's full
+        historical CSV fetched in one connector run).
+
+        Returns None if fewer than 10 historical values exist (cold start —
+        no outlier check should be applied yet).
+        """
         try:
             rows = execute_query(
                 f"SELECT {field} FROM {table} WHERE {field} IS NOT NULL "
                 f"ORDER BY rowid DESC LIMIT ?",
                 (window,),
             )
-            if len(rows) < 10:
-                return False
             values = [float(r[0]) for r in rows if r[0] is not None]
-            if not values:
-                return False
+            if len(values) < 10:
+                return None
             mean = sum(values) / len(values)
             variance = sum((v - mean) ** 2 for v in values) / len(values)
             std = variance ** 0.5
             if std == 0:
-                return False
-            z = abs((value - mean) / std)
-            if z > 3.0:
-                logger.warning(
-                    "Outlier detected: %s.%s = %s (z=%.2f, mean=%.3f, std=%.3f)",
-                    table, field, value, z, mean, std,
-                )
-                return True
+                return None
+            return mean, std
         except Exception as exc:
-            logger.debug("Outlier check failed for %s.%s: %s", table, field, exc)
+            logger.debug("Baseline snapshot failed for %s.%s: %s", table, field, exc)
+            return None
+
+    @staticmethod
+    def is_outlier(value: float, baseline: Optional[Tuple[float, float]], field: str = "", table: str = "") -> bool:
+        """Check `value` against a (mean, std) baseline from get_zscore_baseline(). |z| > 3.0 = outlier."""
+        if baseline is None:
+            return False
+        mean, std = baseline
+        z = abs((value - mean) / std)
+        if z > 3.0:
+            logger.warning(
+                "Outlier detected: %s.%s = %s (z=%.2f, mean=%.3f, std=%.3f)",
+                table, field, value, z, mean, std,
+            )
+            return True
         return False
+
+    @staticmethod
+    def check_outlier_zscore(
+        value: float, field: str, table: str, window: int = 90
+    ) -> bool:
+        """
+        Single-row convenience wrapper: snapshot the baseline and check once.
+        Do NOT call this in a loop over many rows within the same connector
+        run — it re-queries the table every call, so rows inserted earlier in
+        the same batch skew the baseline for later rows. Use
+        get_zscore_baseline() once + is_outlier() per row instead.
+        """
+        baseline = DataValidator.get_zscore_baseline(field, table, window)
+        return DataValidator.is_outlier(value, baseline, field, table)
 
     # ── Schema validation ─────────────────────────────────────────────────────
 
@@ -196,8 +258,13 @@ class DataValidator:
     # ── Conflict detection (live_enrichment) ──────────────────────────────────
 
     @staticmethod
-    def check_enrichment_conflict(port: str, new_row: Dict[str, Any]) -> None:
-        """Log a warning if key signals shift dramatically vs. the previous row."""
+    def check_enrichment_conflict(port: str, new_row: Dict[str, Any]) -> List[str]:
+        """
+        Detect key signals shifting dramatically vs. the previous live_enrichment row.
+        Returns the list of field names that conflict — the caller must hold back
+        (keep the previous value for) each flagged field rather than overwrite it.
+        """
+        conflicting_fields: List[str] = []
         try:
             rows = execute_query(
                 "SELECT weather_severity_live, supply_disruption_index_live "
@@ -206,22 +273,26 @@ class DataValidator:
                 (port,),
             )
             if not rows:
-                return
+                return conflicting_fields
             prev_weather = rows[0][0]
             prev_sdi = rows[0][1]
             new_weather = new_row.get("weather_severity_live")
             new_sdi = new_row.get("supply_disruption_index_live")
             if prev_weather and new_weather and abs(new_weather - prev_weather) > 0.5:
                 logger.warning(
-                    "live_enrichment conflict for %s: weather_severity %.3f → %.3f",
+                    "live_enrichment conflict for %s: weather_severity %.3f → %.3f — holding back new value",
                     port, prev_weather, new_weather,
                 )
+                conflicting_fields.append("weather_severity_live")
             if prev_sdi and new_sdi and prev_sdi > 0:
                 shift_pct = abs(new_sdi - prev_sdi) / prev_sdi * 100
                 if shift_pct > 30:
                     logger.warning(
-                        "live_enrichment conflict for %s: supply_disruption_index %.3f → %.3f (%.1f%% shift)",
+                        "live_enrichment conflict for %s: supply_disruption_index %.3f → %.3f "
+                        "(%.1f%% shift) — holding back new value",
                         port, prev_sdi, new_sdi, shift_pct,
                     )
+                    conflicting_fields.append("supply_disruption_index_live")
         except Exception as exc:
             logger.debug("Conflict check failed for %s: %s", port, exc)
+        return conflicting_fields
