@@ -251,18 +251,79 @@ def show_ingestion_dashboard() -> None:
         )
         if log_rows:
             log_data = []
+            circuit_open_sources = set()
             for row in log_rows:
+                status = row[2]
+                if status == "circuit_open":
+                    circuit_open_sources.add(row[1])
                 log_data.append({
                     "Timestamp (UTC)": (row[0] or "")[:19].replace("T", " "),
                     "Source": row[1],
-                    "Status": row[2],
+                    "Status": status,
                     "Inserted": row[3],
                     "Skipped": row[4],
                     "Duration (ms)": row[5],
                     "Error": row[6] or "",
                 })
+            if circuit_open_sources:
+                st.warning(
+                    "Circuit breaker open (3 consecutive failures) for: "
+                    + ", ".join(sorted(circuit_open_sources))
+                )
             st.dataframe(log_data, use_container_width=True)
         else:
             st.info("No ingestion runs logged yet.")
     except Exception as exc:
         st.warning(f"Could not load run log: {exc}")
+
+    st.divider()
+
+    # ── Guardrails: Quarantined Rows ──────────────────────────────────────────
+    st.subheader("Guardrails — Quarantined Rows")
+    st.caption(
+        "Rows rejected by the outlier (Z-score) or live_enrichment conflict checks "
+        "are held back here instead of being persisted or overwriting prior signal values."
+    )
+    try:
+        quarantine_summary = execute_query(
+            """
+            SELECT source, field, COUNT(*) AS n
+            FROM ingestion_quarantine
+            WHERE quarantined_at_utc >= datetime('now', '-7 days')
+            GROUP BY source, field
+            ORDER BY n DESC
+            """,
+        )
+        if quarantine_summary:
+            st.dataframe(
+                [{"Source": r[0], "Field": r[1], "Quarantined (7d)": r[2]} for r in quarantine_summary],
+                use_container_width=True,
+            )
+        else:
+            st.info("No rows quarantined in the last 7 days.")
+
+        quarantine_rows = execute_query(
+            """
+            SELECT quarantined_at_utc, source, target_table, field, value, reason
+            FROM ingestion_quarantine
+            ORDER BY quarantined_at_utc DESC LIMIT 25
+            """,
+        )
+        if quarantine_rows:
+            with st.expander("Recent quarantined rows"):
+                st.dataframe(
+                    [
+                        {
+                            "Timestamp (UTC)": (r[0] or "")[:19].replace("T", " "),
+                            "Source": r[1],
+                            "Target Table": r[2],
+                            "Field": r[3],
+                            "Value": r[4],
+                            "Reason": r[5],
+                        }
+                        for r in quarantine_rows
+                    ],
+                    use_container_width=True,
+                )
+    except Exception as exc:
+        st.warning(f"Could not load quarantine data: {exc}")
