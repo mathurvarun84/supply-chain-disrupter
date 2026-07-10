@@ -311,6 +311,10 @@ def weather_risk_monitoring_agent(state: GlobalState) -> Dict[str, Any]:
                 response_model=WeatherRiskLLMOutput,
                 model=MODEL_FAST,
                 max_tokens=512,
+                run_id=state.run_id,
+                agent_name="L3_weather",
+                trace=state.langfuse_trace,
+                span=state.langfuse_span,
             )
             final_severity = llm_output.geo_risk_component
             llm_used = True

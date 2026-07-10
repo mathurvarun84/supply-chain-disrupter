@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from src.api.schemas import PipelineStatus, PipelineRunRequest, PipelineRunResponse
 from src.api.fixtures import INITIAL_AGENTS, RUN_ID_FIXTURE
+from src.utils.observability import build_langfuse_trace_url
 
 router = APIRouter()
 
@@ -13,6 +14,7 @@ def get_status():
         agents=INITIAL_AGENTS,
         last_ingested_at=None,
         openai_status="connected",
+        langfuse_trace_url=build_langfuse_trace_url(RUN_ID_FIXTURE),
     )
 
 

@@ -18,6 +18,7 @@ class PipelineStatus(BaseModel):
     agents: List[AgentState]
     last_ingested_at: Optional[str] = None
     openai_status: Literal["connected", "disconnected"] = "connected"
+    langfuse_trace_url: Optional[str] = None
 
 
 class PipelineRunRequest(BaseModel):
@@ -153,8 +154,9 @@ class PromptLogRow(BaseModel):
     ts: str
     agent: str
     model: str
-    prompt: str
-    resp: str
+    prompt: str          # truncated preview for the table row
+    resp: str            # full serialized response
+    full_prompt: Optional[str] = None  # system + user, for expand view
     tokens: int
     cost: float
     latency: float

@@ -74,13 +74,25 @@ def call_openai_structured(
     response_model: Type[T],
     model: str = MODEL_REASONING,
     max_tokens: int = 1024,
+    *,
+    run_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    trace=None,
+    span=None,
 ) -> T:
     """
     Call OpenAI structured output API and return a validated Pydantic instance.
 
     Uses client.beta.chat.completions.parse() exclusively.
     temperature is always 0.0 (deterministic). Retries on RateLimitError only.
+
+    run_id / agent_name / trace / span are optional keyword-only args for
+    observability. All existing call sites continue to work without them.
+    When provided, each call writes to llm_call_log (always) and a nested
+    Langfuse generation under the owning agent span (best-effort).
     """
+    retry_count_ref = [0]
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=1, max=10),
@@ -106,6 +118,7 @@ def call_openai_structured(
             raise
         except RateLimitError as exc:
             logger.warning("OpenAI RateLimitError for model=%s — retrying: %s", model, exc)
+            retry_count_ref[0] += 1
             raise
 
         elapsed = time.monotonic() - t0
@@ -117,13 +130,46 @@ def call_openai_structured(
         usage = completion.usage
         in_tok = usage.prompt_tokens if usage else 0
         out_tok = usage.completion_tokens if usage else 0
+        latency_ms = elapsed * 1000
         logger.info(
             "[LLM] tool=%s model=%s in=%d out=%d latency=%.2fs",
             response_model.__name__, model, in_tok, out_tok, elapsed,
         )
+
+        if run_id and agent_name:
+            try:
+                from src.utils.observability import record_llm_generation
+                record_llm_generation(
+                    trace, span,
+                    run_id=run_id, agent_name=agent_name, model=model,
+                    system_prompt=system_prompt, user_message=user_message,
+                    parsed_output=message.parsed,
+                    input_tokens=in_tok, output_tokens=out_tok,
+                    latency_ms=latency_ms, status="success",
+                    retry_count=retry_count_ref[0],
+                )
+            except Exception as obs_exc:
+                logger.warning("Observability record failed (non-blocking): %s", obs_exc)
+
         return message.parsed
 
-    return _call()
+    try:
+        return _call()
+    except Exception as exc:
+        if run_id and agent_name:
+            try:
+                from src.utils.observability import record_llm_generation
+                record_llm_generation(
+                    trace, span,
+                    run_id=run_id, agent_name=agent_name, model=model,
+                    system_prompt=system_prompt, user_message=user_message,
+                    parsed_output=None, input_tokens=0, output_tokens=0,
+                    latency_ms=0.0, status="failed_fallback",
+                    retry_count=retry_count_ref[0], error_message=str(exc),
+                )
+            except Exception as obs_exc:
+                logger.warning("Observability failure record failed (non-blocking): %s", obs_exc)
+        raise
 
 
 def build_rag_context(

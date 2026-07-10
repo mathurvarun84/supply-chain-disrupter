@@ -8,6 +8,7 @@ import { TabPlaceholder } from "./components/TabPlaceholder";
 import { TabLiveFeed } from "./TabLiveFeed";
 import { TabRiskClassification } from "./TabRiskClassification";
 import { TabRagEval } from "./TabRagEval";
+import { TabObservability } from "./TabObservability";
 import { usePipelineStatus } from "./hooks/usePipelineStatus";
 
 const TABS = [
@@ -129,6 +130,8 @@ export default function App() {
               <TabLiveFeed onTabSwitch={setActiveTab} />
             ) : activeTab === 1 ? (
               <TabRiskClassification />
+            ) : activeTab === 4 ? (
+              <TabObservability />
             ) : activeTab === 5 ? (
               <TabRagEval />
             ) : (

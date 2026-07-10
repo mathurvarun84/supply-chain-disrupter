@@ -9,7 +9,7 @@ Returns LLMSignal or None on failure — never raises.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # Any used for trace/span opaque handles
 
 from src.agents.state import LLMSignal, RuleBasedSignal
 from src.utils.openai_utils import (
@@ -199,6 +199,9 @@ def run_llm_signal(
     rule_signal: RuleBasedSignal,
     disruption_type: str,
     order_region: Optional[str],
+    run_id: Optional[str] = None,
+    trace: Any = None,
+    span: Any = None,
 ) -> Optional[LLMSignal]:
     """
     Run Signal 3: GPT-4o + two-stage RAG. Returns None on failure — never raises.
@@ -237,6 +240,10 @@ def run_llm_signal(
             response_model=LLMSignal,
             model=MODEL_REASONING,
             max_tokens=768,
+            run_id=run_id,
+            agent_name="L4_llm_signal",
+            trace=trace,
+            span=span,
         )
         logger.info(
             "Signal 3 LLM: label=%s driver=%s confidence=%s chunks=%d",

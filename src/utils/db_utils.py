@@ -62,6 +62,56 @@ def ensure_schema() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_execution_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                duration_ms REAL,
+                error_message TEXT,
+                langfuse_trace_id TEXT,
+                langfuse_span_id TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_preview TEXT,
+                full_prompt TEXT,
+                full_response TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                cost_usd REAL,
+                latency_ms REAL,
+                status TEXT NOT NULL,
+                retry_count INTEGER DEFAULT 0,
+                error_message TEXT,
+                langfuse_trace_id TEXT,
+                langfuse_generation_id TEXT,
+                ts TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_call_log_run_id ON llm_call_log(run_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_call_log_agent ON llm_call_log(agent_name)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_execution_log_run_id ON agent_execution_log(run_id)"
+        )
     ensure_simulation_schema()
 
 
@@ -253,6 +303,89 @@ def insert_mitigation_action(
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (event_date, port, sku, risk_label, recommendation, cost_delta),
+    )
+
+
+def insert_llm_call_log(**kwargs) -> None:
+    """Persist one LLM call record. Accepts all llm_call_log columns as keyword args."""
+    execute_non_query(
+        """
+        INSERT INTO llm_call_log (
+            run_id, agent_name, model, prompt_preview, full_prompt, full_response,
+            input_tokens, output_tokens, total_tokens, cost_usd, latency_ms,
+            status, retry_count, error_message, langfuse_trace_id, langfuse_generation_id
+        ) VALUES (
+            :run_id, :agent_name, :model, :prompt_preview, :full_prompt, :full_response,
+            :input_tokens, :output_tokens, :total_tokens, :cost_usd, :latency_ms,
+            :status, :retry_count, :error_message, :langfuse_trace_id, :langfuse_generation_id
+        )
+        """,
+        {
+            "run_id": kwargs.get("run_id"),
+            "agent_name": kwargs.get("agent_name"),
+            "model": kwargs.get("model"),
+            "prompt_preview": kwargs.get("prompt_preview"),
+            "full_prompt": kwargs.get("full_prompt"),
+            "full_response": kwargs.get("full_response"),
+            "input_tokens": kwargs.get("input_tokens", 0),
+            "output_tokens": kwargs.get("output_tokens", 0),
+            "total_tokens": kwargs.get("total_tokens", 0),
+            "cost_usd": kwargs.get("cost_usd", 0.0),
+            "latency_ms": kwargs.get("latency_ms", 0.0),
+            "status": kwargs.get("status", "success"),
+            "retry_count": kwargs.get("retry_count", 0),
+            "error_message": kwargs.get("error_message"),
+            "langfuse_trace_id": kwargs.get("langfuse_trace_id"),
+            "langfuse_generation_id": kwargs.get("langfuse_generation_id"),
+        },
+    )
+
+
+def insert_agent_execution(**kwargs) -> None:
+    """Insert a new agent execution row with status=Running."""
+    execute_non_query(
+        """
+        INSERT INTO agent_execution_log (run_id, agent_name, status, started_at)
+        VALUES (:run_id, :agent_name, :status, :started_at)
+        """,
+        {
+            "run_id": kwargs.get("run_id"),
+            "agent_name": kwargs.get("agent_name"),
+            "status": kwargs.get("status", "Running"),
+            "started_at": kwargs.get("started_at"),
+        },
+    )
+
+
+def update_agent_execution(run_id: str, agent_name: str, **kwargs) -> None:
+    """Update an existing agent execution row (status, timing, error, Langfuse ids)."""
+    execute_non_query(
+        """
+        UPDATE agent_execution_log
+        SET status = :status,
+            completed_at = :completed_at,
+            duration_ms = :duration_ms,
+            error_message = :error_message,
+            langfuse_trace_id = :langfuse_trace_id,
+            langfuse_span_id = :langfuse_span_id,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE run_id = :run_id AND agent_name = :agent_name
+          AND id = (
+              SELECT id FROM agent_execution_log
+              WHERE run_id = :run_id AND agent_name = :agent_name
+              ORDER BY id DESC LIMIT 1
+          )
+        """,
+        {
+            "run_id": run_id,
+            "agent_name": agent_name,
+            "status": kwargs.get("status"),
+            "completed_at": kwargs.get("completed_at"),
+            "duration_ms": kwargs.get("duration_ms"),
+            "error_message": kwargs.get("error_message"),
+            "langfuse_trace_id": kwargs.get("langfuse_trace_id"),
+            "langfuse_span_id": kwargs.get("langfuse_span_id"),
+        },
     )
 
 

@@ -13,6 +13,7 @@ export interface PipelineStatus {
   agents: AgentState[];
   last_ingested_at: string | null;
   openai_status: "connected" | "disconnected";
+  langfuse_trace_url: string | null;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;

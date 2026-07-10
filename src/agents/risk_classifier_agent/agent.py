@@ -478,6 +478,9 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
             rule_signal=rule_signal,
             disruption_type=state.event_metadata.disruption_type,
             order_region=record.get("order_region"),
+            run_id=state.run_id,
+            trace=state.langfuse_trace,
+            span=state.langfuse_span,
         )
 
     # ── LLM-as-Judge (non-blocking) ──────────────────────────────────────────
@@ -487,6 +490,9 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
         llm_signal=llm_signal,
         record=record,
         semiconductor_rows=semiconductor_rows,
+        run_id=state.run_id,
+        trace=state.langfuse_trace,
+        span=state.langfuse_span,
     )
 
     # ── Final label fallback chain: judge → llm_signal → rule-based ──────────
