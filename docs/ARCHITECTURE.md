@@ -426,19 +426,43 @@ Flow:
 
 ## L6 — Monte Carlo Simulation (Optional)
 
-**Module:** `src/agents/langgraph_engine.py:simulation_agent()`
+**Module:** `src/agents/simulation_agent/` (`agent.py`, `engine.py`, `priors.py`)
 
-A deterministic approximation (no actual Monte Carlo sampling) that estimates stockout risk from inventory levels and composite risk score.
+L6 runs a **Monte Carlo discrete-time inventory simulation** (default 2,000 trials,
+set per scenario in the Streamlit Scenario Analyzer form via `simulation_trials`).
+Each trial samples stochastic lead time,
+demand (optionally from L5 Prophet forecast), supplier reliability, and disruption
+duration, then simulates daily inventory balance over the scenario recovery window.
 
 ```
-stockout_probability = composite_score × 100
-                     + (1 - inventory/incoming) × 25
-                     + (lead_time_days/30) × 25
-                     (capped at 100%)
+Inputs (from GlobalState):
+  active_record — inventory_level, incoming_supply, lead_time_days, demand, unit_price_usd
+  risk_classification — composite_score
+  forecast_result — 30-day Prophet demand path (optional)
+  event_metadata — severity, shock_duration_days, recovery_window_days, disruption_type
+  news_analysis_llm — expected_duration_days (duration prior fallback)
+  config — region_route_maps / route_maps for alternate_route
+
+Per trial:
+  1. Sample lead time (lognormal, inflated by severity + supply_disruption_index)
+  2. Sample disruption duration from shock_duration_days or news LLM estimate
+  3. Daily inventory balance: demand shock during disruption, inbound after lead time
+  4. Track stockout day, unmet demand, revenue loss
+
+Aggregates:
+  stockout_probability_pct     — fraction of trials with stockout × 100
+  stockout_probability_p10/p90 — severity score percentiles
+  revenue_impact_usd_p10/p50/p90
+  days_to_stockout_p10/p50/p90
+  expected_inventory_gap_pct, alternate_route, trials_run, model_version
+
+Persistence: simulation_runs table (insert_simulation_run in db_utils.py)
 
 Output: GlobalState.simulation_result
-  { stockout_probability_pct, expected_inventory_gap_pct, alternate_route }
 ```
+
+On failure, L6 falls back to a deterministic heuristic and still attempts persistence.
+L6 is optional — failures are caught by `_optional_node` and do not block L7.
 
 ---
 
@@ -716,6 +740,7 @@ python evaluation/qa_05_live_mode_taiwan_earthquake.py
 python evaluation/qa_09_l2_l3_real_ingest_smoke.py
 python evaluation/qa_10_taiwan_earthquake_l2_l3_scenario.py
 python evaluation/qa_11_langgraph_l1_l2_l3_integration.py
+python evaluation/qa_12_simulation_agent.py
 ```
 
 | Script | Layer | Purpose |
@@ -723,5 +748,6 @@ python evaluation/qa_11_langgraph_l1_l2_l3_integration.py
 | `qa_09_l2_l3_real_ingest_smoke.py` | L2, L3 | Real `news_signals` / `weather_signals` SQLite reads; blocks live APIs |
 | `qa_10_taiwan_earthquake_l2_l3_scenario.py` | L2, L3 | Documented Taiwan earthquake scenario (report-friendly PASS/FAIL) |
 | `qa_11_langgraph_l1_l2_l3_integration.py` | L1→L2→L3 | State propagation on a real `daily_records` row |
+| `qa_12_simulation_agent.py` | L6, L7 | Monte Carlo impact ranges + `simulation_runs` persistence |
 
 Unit tests (`tests/test_news_weather_agents_v2.py`) cover agent contracts with mocks. QA scripts add real-DB wiring checks and capstone evaluation artifacts.

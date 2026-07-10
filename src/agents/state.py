@@ -11,6 +11,12 @@ class EventMetadata(BaseModel):
     shock_duration_days: int
     recovery_window_days: int
     synthetic_ratio: float
+    simulation_trials: int = Field(
+        default=2000,
+        ge=100,
+        le=10000,
+        description="Monte Carlo trial count for L6 impact simulation.",
+    )
 
 
 class NewsRiskSignal(BaseModel):
@@ -34,6 +40,17 @@ class SimulationResult(BaseModel):
     stockout_probability_pct: float
     expected_inventory_gap_pct: float
     alternate_route: Optional[str]
+    stockout_probability_p10: Optional[float] = None
+    stockout_probability_p90: Optional[float] = None
+    days_to_stockout_p50: Optional[float] = None
+    days_to_stockout_p10: Optional[float] = None
+    days_to_stockout_p90: Optional[float] = None
+    revenue_impact_usd_p50: Optional[float] = None
+    revenue_impact_usd_p10: Optional[float] = None
+    revenue_impact_usd_p90: Optional[float] = None
+    trials_run: int = 0
+    model_version: str = "mc_v1"
+    revenue_impact_samples: List[float] = Field(default_factory=list)
 
 
 class MitigationAction(BaseModel):
