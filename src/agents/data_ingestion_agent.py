@@ -33,8 +33,10 @@ from src.utils.ingestion_connectors import (
     FredConnector,
     GdeltConnector,
     GoogleNewsRSSConnector,
+    NewsMcpConnector,
     OpenMeteoEnhancedConnector,
     ReutersRSSConnector,
+    WeatherMcpConnector,
     YFinanceConnector,
 )
 from src.utils.ingestion_validator import DataValidator
@@ -43,6 +45,7 @@ from src.utils.yaml_utils import load_config, get_port_coordinates
 logger = logging.getLogger(__name__)
 
 _INGESTION_LOCK = threading.Lock()
+_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failed runs before a connector is skipped
 
 
 class IngestionRunResult(BaseModel):
@@ -141,9 +144,11 @@ class DataIngestionAgent:
 
         connector_classes = [
             OpenMeteoEnhancedConnector,
+            WeatherMcpConnector,
             FredConnector,
             GdeltConnector,
             GoogleNewsRSSConnector,
+            NewsMcpConnector,
             ReutersRSSConnector,
             CisaBisRSSConnector,
             YFinanceConnector,
@@ -178,6 +183,18 @@ class DataIngestionAgent:
             status=status,
         )
 
+    def _is_circuit_open(self, source: str) -> bool:
+        """True if the last _CIRCUIT_BREAKER_THRESHOLD runs for this source all failed."""
+        try:
+            rows = execute_query(
+                "SELECT status FROM ingestion_run_log WHERE source = ? "
+                "ORDER BY run_ts_utc DESC LIMIT ?",
+                (source, _CIRCUIT_BREAKER_THRESHOLD),
+            )
+            return len(rows) == _CIRCUIT_BREAKER_THRESHOLD and all(r[0] == "failed" for r in rows)
+        except Exception:
+            return False
+
     def _run_connector(
         self, connector: BaseConnector, run_id: str
     ) -> Dict[str, Any]:
@@ -186,6 +203,19 @@ class DataIngestionAgent:
         inserted = skipped = 0
         error_detail: Optional[str] = None
         last_fetched_key: Optional[str] = None
+
+        if self._is_circuit_open(connector.SOURCE_NAME):
+            logger.warning(
+                "%s: circuit open (last %d runs failed) — skipping this run.",
+                connector.SOURCE_NAME, _CIRCUIT_BREAKER_THRESHOLD,
+            )
+            self._log_run(
+                run_id=run_id, source=connector.SOURCE_NAME, connector_class=type(connector).__name__,
+                rows_fetched=0, rows_inserted=0, rows_skipped=0, duration_ms=0,
+                status="circuit_open", error_detail="Skipped — consecutive prior failures exceeded threshold.",
+                last_fetched_key=None,
+            )
+            return {"inserted": 0, "skipped": 0, "error": "circuit_open"}
 
         try:
             raw = connector.fetch()
@@ -316,8 +346,32 @@ class DataIngestionAgent:
                     "is_consumed": 0,
                 }
 
-                # Conflict check before writing
-                DataValidator.check_enrichment_conflict(port, new_row)
+                # Conflict check before writing — hold back any field that shifted
+                # too sharply vs. the previous row, keeping the prior value instead.
+                conflicting_fields = DataValidator.check_enrichment_conflict(port, new_row)
+                if conflicting_fields:
+                    prev_rows = execute_query(
+                        "SELECT weather_severity_live, supply_disruption_index_live "
+                        "FROM live_enrichment WHERE port = ? "
+                        "ORDER BY enrichment_ts_utc DESC LIMIT 1",
+                        (port,),
+                    )
+                    prev_weather = prev_rows[0][0] if prev_rows else None
+                    prev_sdi = prev_rows[0][1] if prev_rows else None
+                    if "weather_severity_live" in conflicting_fields:
+                        DataValidator.quarantine_row(
+                            source="live_enrichment", target_table="live_enrichment",
+                            field="weather_severity_live", value=weather_sev,
+                            reason="enrichment_conflict: shift > 0.5 vs previous", row=new_row, run_id=run_id,
+                        )
+                        weather_sev = prev_weather
+                    if "supply_disruption_index_live" in conflicting_fields:
+                        DataValidator.quarantine_row(
+                            source="live_enrichment", target_table="live_enrichment",
+                            field="supply_disruption_index_live", value=sdi_live,
+                            reason="enrichment_conflict: shift > 30% vs previous", row=new_row, run_id=run_id,
+                        )
+                        sdi_live = prev_sdi
 
                 with get_connection() as conn:
                     conn.execute(

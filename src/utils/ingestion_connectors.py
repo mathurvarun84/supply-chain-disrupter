@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from src.mcp_servers.news_mcp import fetch_news_headlines
+from src.mcp_servers.weather_mcp import fetch_hub_weather
 from src.utils.db_utils import execute_many, execute_query, get_connection
 from src.utils.ingestion_schema import get_last_fetched_key
 from src.utils.ingestion_validator import DataValidator
@@ -313,10 +315,25 @@ class OpenMeteoEnhancedConnector(BaseConnector):
             if hub_rows[max_idx]["raw_severity_score"] >= 6.0:
                 hub_rows[max_idx]["is_trigger_hub"] = 1
 
+        # Snapshot the outlier baseline once — reusing it for every row in this
+        # batch avoids the baseline drifting as rows are inserted mid-loop.
+        weather_baseline = DataValidator.get_zscore_baseline("derived_weather_severity", "weather_events")
+
         for row in weather_rows:
             ok, errs = DataValidator.validate_weather_event(row)
             if not ok:
                 logger.warning("Invalid weather_event row: %s", errs)
+                skipped += 1
+                continue
+            severity = row.get("derived_weather_severity")
+            if severity is not None and DataValidator.is_outlier(
+                severity, weather_baseline, "derived_weather_severity", "weather_events"
+            ):
+                DataValidator.quarantine_row(
+                    source=self.SOURCE_NAME, target_table="weather_events",
+                    field="derived_weather_severity", value=severity,
+                    reason="outlier: |z| > 3.0", row=row, run_id=run_id,
+                )
                 skipped += 1
                 continue
             try:
@@ -372,6 +389,83 @@ class OpenMeteoEnhancedConnector(BaseConnector):
                 inserted += 1
             except Exception as exc:
                 logger.warning("live_weather_ingest insert failed for %s: %s", row.get("hub_city"), exc)
+                skipped += 1
+
+        return inserted, skipped
+
+
+# ── 1b. Weather MCP server (semiconductor hub cities) ───────────────────────
+
+class WeatherMcpConnector(BaseConnector):
+    """
+    Fetches hub-city weather via the standalone weather MCP server's tool
+    function (src.mcp_servers.weather_mcp.fetch_hub_weather), called in-process
+    rather than through the MCP stdio protocol. Runs alongside
+    OpenMeteoEnhancedConnector's hub-city path so both sources are compared in
+    ingestion_run_log before either is retired.
+    """
+    SOURCE_NAME = "weather_mcp"
+    TARGET_TABLE = "live_weather_ingest"
+
+    def fetch(self) -> List[Dict[str, Any]]:
+        results = []
+        for city, (lat, lon) in HUB_CITIES.items():
+            try:
+                results.append(fetch_hub_weather(city, lat, lon))
+            except Exception as exc:
+                logger.warning("weather_mcp fetch failed for hub city %s: %s", city, exc)
+        return results
+
+    def normalize(self, raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ts = _now_utc()
+        rows = []
+        for data in raw:
+            rows.append({
+                "fetched_at_utc": ts,
+                "hub_city": data["city"],
+                "latitude": data["latitude"],
+                "longitude": data["longitude"],
+                "wind_speed_kmh": data.get("wind_speed_kmh"),
+                "precipitation_mm": data.get("precipitation_mm"),
+                "weather_code": data.get("weather_code"),
+                "temperature_c": data.get("temperature_c"),
+                "raw_severity_score": data.get("raw_severity_score", 0.0),
+                "is_trigger_hub": 0,  # set in persist after finding max
+            })
+        return rows
+
+    def persist(self, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
+        inserted = skipped = 0
+        run_id = self._run_id or "unknown"
+
+        if rows:
+            max_idx = max(range(len(rows)), key=lambda i: rows[i]["raw_severity_score"])
+            if rows[max_idx]["raw_severity_score"] >= 6.0:
+                rows[max_idx]["is_trigger_hub"] = 1
+
+        for row in rows:
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO live_weather_ingest
+                        (run_id, fetched_at_utc, hub_city, latitude, longitude,
+                         wind_speed_kmh, precipitation_mm, weather_code,
+                         temperature_c, raw_severity_score, is_trigger_hub)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            run_id, row["fetched_at_utc"], row["hub_city"],
+                            row["latitude"], row["longitude"],
+                            row.get("wind_speed_kmh"), row.get("precipitation_mm"),
+                            row.get("weather_code"), row.get("temperature_c"),
+                            row["raw_severity_score"], row["is_trigger_hub"],
+                        ),
+                    )
+                    conn.commit()
+                inserted += 1
+            except Exception as exc:
+                logger.warning("live_weather_ingest (mcp) insert failed for %s: %s", row.get("hub_city"), exc)
                 skipped += 1
 
         return inserted, skipped
@@ -462,9 +556,22 @@ class FredConnector(BaseConnector):
 
     def persist(self, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
         inserted = skipped = 0
+        run_id = self._run_id or "unknown"
+        sdi_baseline = DataValidator.get_zscore_baseline("normalized_sdi", "freight_signals")
         for row in rows:
             ok, errs = DataValidator.validate_freight_signal(row)
             if not ok:
+                skipped += 1
+                continue
+            sdi = row.get("normalized_sdi")
+            if sdi is not None and DataValidator.is_outlier(
+                sdi, sdi_baseline, "normalized_sdi", "freight_signals"
+            ):
+                DataValidator.quarantine_row(
+                    source=self.SOURCE_NAME, target_table="freight_signals",
+                    field="normalized_sdi", value=sdi,
+                    reason="outlier: |z| > 3.0", row=row, run_id=run_id,
+                )
                 skipped += 1
                 continue
             try:
@@ -751,6 +858,98 @@ class GoogleNewsRSSConnector(BaseConnector):
         return inserted + ins2, skipped + sk2
 
 
+# ── 4b. News MCP server (hub city / country / supplier queries) ─────────────
+
+class NewsMcpConnector(BaseConnector):
+    """
+    Fetches hub-city/hub-country/supplier news via the standalone news MCP
+    server's tool function (src.mcp_servers.news_mcp.fetch_news_headlines),
+    called in-process rather than through the MCP stdio protocol. Runs
+    alongside GoogleNewsRSSConnector's hub-query path so both sources are
+    compared in ingestion_run_log before either is retired.
+    """
+    SOURCE_NAME = "news_mcp"
+    TARGET_TABLE = "live_news_ingest"
+
+    def fetch(self) -> List[Dict[str, Any]]:
+        hub_query_map: List[Dict[str, Any]] = []
+        for city, query in _HUB_CITY_QUERIES.items():
+            hub_query_map.append({"query": query, "hub_city": city, "hub_country": None, "supplier_country": None})
+        for country, query in _HUB_COUNTRY_QUERIES.items():
+            hub_query_map.append({"query": query, "hub_city": None, "hub_country": country, "supplier_country": None})
+        for supplier, query in _SUPPLIER_QUERIES.items():
+            hub_query_map.append({"query": query, "hub_city": None, "hub_country": None, "supplier_country": supplier})
+
+        results = []
+        for meta in hub_query_map:
+            try:
+                articles = fetch_news_headlines(
+                    query=meta["query"],
+                    hub_city=meta["hub_city"],
+                    hub_country=meta["hub_country"],
+                    supplier_country=meta["supplier_country"],
+                    max_results=10,
+                )
+                for article in articles:
+                    article["_query_term"] = meta["query"]
+                    results.append(article)
+            except Exception as exc:
+                logger.warning("news_mcp fetch failed for '%s': %s", meta["query"], exc)
+        return results
+
+    def normalize(self, raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ts = _now_utc()
+        rows = []
+        for r in raw:
+            headline = r.get("headline", "")
+            if not headline:
+                continue
+            rows.append({
+                "fetched_at_utc": ts,
+                "source_feed": "news_mcp",
+                "query_term": r.get("_query_term"),
+                "hub_city": r.get("hub_city"),
+                "hub_country": r.get("hub_country"),
+                "supplier_country": r.get("supplier_country"),
+                "headline": headline[:1000],
+                "summary": r.get("summary", "")[:500],
+                "published_at": DataValidator.normalize_timestamp(r.get("published_at", "")),
+                "url": r.get("url", "")[:2048],
+                "relevance_score": r.get("relevance_score", 0.0),
+            })
+        return rows
+
+    def persist(self, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
+        run_id = self._run_id or "unknown"
+        inserted = skipped = 0
+        for row in rows:
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO live_news_ingest
+                        (run_id, fetched_at_utc, source_feed, query_term,
+                         hub_city, hub_country, supplier_country,
+                         headline, summary, published_at, url, relevance_score)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            run_id, row["fetched_at_utc"], row["source_feed"],
+                            row.get("query_term"), row.get("hub_city"),
+                            row.get("hub_country"), row.get("supplier_country"),
+                            row["headline"], row.get("summary"),
+                            row.get("published_at"), row.get("url"),
+                            row["relevance_score"],
+                        ),
+                    )
+                    conn.commit()
+                inserted += 1
+            except Exception as exc:
+                logger.warning("live_news_ingest (mcp) insert failed: %s", exc)
+                skipped += 1
+        return inserted, skipped
+
+
 # ── 5. Reuters RSS ───────────────────────────────────────────────────────────
 
 class ReutersRSSConnector(BaseConnector):
@@ -958,7 +1157,20 @@ class YFinanceConnector(BaseConnector):
 
     def persist(self, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
         inserted = skipped = 0
+        run_id = self._run_id or "unknown"
+        cpi_baseline = DataValidator.get_zscore_baseline("normalized_chip_price_index", "market_demand_signals")
         for row in rows:
+            cpi = row.get("normalized_chip_price_index")
+            if cpi is not None and DataValidator.is_outlier(
+                cpi, cpi_baseline, "normalized_chip_price_index", "market_demand_signals"
+            ):
+                DataValidator.quarantine_row(
+                    source=self.SOURCE_NAME, target_table="market_demand_signals",
+                    field="normalized_chip_price_index", value=cpi,
+                    reason="outlier: |z| > 3.0", row=row, run_id=run_id,
+                )
+                skipped += 1
+                continue
             try:
                 with get_connection() as conn:
                     cur = conn.execute(

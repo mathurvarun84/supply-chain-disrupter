@@ -222,6 +222,22 @@ _DDL_STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_news_signals_region ON news_signals(detected_region)",
     "CREATE INDEX IF NOT EXISTS idx_news_signals_published ON news_signals(published_at)",
+    # ── Guardrails: quarantine for rows rejected by outlier/conflict checks ──
+    """
+    CREATE TABLE IF NOT EXISTS ingestion_quarantine (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        quarantined_at_utc  TEXT NOT NULL,
+        run_id              TEXT,
+        source              TEXT NOT NULL,
+        target_table        TEXT NOT NULL,
+        field               TEXT NOT NULL,
+        value               REAL,
+        reason              TEXT NOT NULL,
+        row_json            TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ingestion_quarantine_ts ON ingestion_quarantine(quarantined_at_utc DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ingestion_quarantine_source ON ingestion_quarantine(source, quarantined_at_utc DESC)",
 ]
 
 

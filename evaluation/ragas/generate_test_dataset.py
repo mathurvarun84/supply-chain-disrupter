@@ -187,15 +187,22 @@ def compute_allocation(
     collections with the most chunks first, respecting caps. If total
     capacity is below `total`, the shortfall is accepted and logged.
     """
+    # Ceiling can't exceed what a collection actually has (no replacement sampling);
+    # floor can't exceed the ceiling either, so a tiny collection isn't asked for more
+    # slots than it can supply.
     caps = {c: min(ceiling, n) for c, n in chunk_counts.items()}
     floors = {c: min(floor, caps[c]) for c in chunk_counts}
     total_chunks = sum(chunk_counts.values())
 
+    # First pass: proportional allocation by chunk-count share, clamped to [floor, cap].
     allocation: Dict[str, int] = {}
     for cname, n in chunk_counts.items():
         raw = round(total * n / total_chunks) if total_chunks else 0
         allocation[cname] = max(floors[cname], min(caps[cname], raw))
 
+    # Rounding in the first pass rarely sums to exactly `total`. Distribute the
+    # remaining +/- slots one at a time, largest collections first, respecting
+    # each collection's cap/floor, until the target is hit or capacity runs out.
     diff = total - sum(allocation.values())
     order = sorted(chunk_counts, key=lambda c: chunk_counts[c], reverse=True)
     while diff != 0:
@@ -294,12 +301,12 @@ def generate_qa_pairs(
     """
     records: List[dict] = []
     rejected: List[str] = []
-    pool = list(replacement_pool)
+    pool = list(replacement_pool)  # unsampled chunks from this collection, shuffled — replacement source
 
     for chunk, query_style in slots:
         current = chunk
         replacements_used = 0
-        while True:
+        while True:  # retry with a replacement chunk until usable, exhausted, or slot dropped
             pair = _generate_one(collection_name, current, query_style)
             if pair is not None and pair.chunk_is_usable:
                 records.append(
@@ -464,18 +471,21 @@ def main() -> int:
     allocation = compute_allocation(counts)
     _print_allocation_table(counts, allocation)
 
-    rng = random.Random(RANDOM_SEED)
+    rng = random.Random(RANDOM_SEED)  # seeded so allocation + sampling are reproducible across re-runs
     sampled_by_collection: Dict[str, List[dict]] = {}
     pools_by_collection: Dict[str, List[dict]] = {}
     convention = "chromadb_native"
     for cname, chunks in chunks_by_collection.items():
         sampled = sample_chunks(chunks, allocation[cname], rng, excluded_ids)
         sampled_by_collection[cname] = sampled
+        # Remaining (unsampled) chunks become this collection's replacement pool,
+        # used by generate_qa_pairs() when a sampled chunk turns out unusable.
         sampled_ids = {c["id"] for c in sampled}
         pool = [c for c in chunks if c["id"] not in sampled_ids]
         rng.shuffle(pool)
         pools_by_collection[cname] = pool
 
+    # No API key: print what WOULD be sampled and stop before spending any LLM calls.
     if not has_anthropic_api_key():
         print("\nSampled chunk ids (dry run):")
         for cname, sampled in sampled_by_collection.items():

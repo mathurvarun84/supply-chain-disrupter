@@ -206,6 +206,7 @@ def score_case_retrieval_only(
     source_collection = case.get("source_collection", "")
     gold_id = case.get("source_chunk_id", "")
 
+    # Hit/rank: did retrieval surface the EXACT chunk this QA pair was generated from?
     retrieved_ids = [_chunk_id_for_hit(hit, source_collection, chunk_id_convention) for hit in chunks]
     hit = gold_id in retrieved_ids
     rank: Optional[int] = retrieved_ids.index(gold_id) + 1 if hit else None
@@ -216,11 +217,15 @@ def score_case_retrieval_only(
         texts = [c.get("text", "") for c in chunks]
         question_vec = embedding_fn([case["question"]])[0]
         chunk_vecs = embedding_fn(texts)
+        # context_relevance: how semantically close is each retrieved chunk to the
+        # question, on average — a cheap, LLM-free proxy for RAGAS's Context Precision.
         sims = [_cosine_similarity(question_vec, v) for v in chunk_vecs]
         context_relevance = sum(sims) / len(sims)
 
         ground_truth = case.get("ground_truth", "")
         if ground_truth:
+            # context_recall_proxy: does the single BEST-matching retrieved chunk
+            # cover the gold answer's content — a cheap proxy for Context Recall.
             gt_vec = embedding_fn([ground_truth])[0]
             best_idx = max(range(len(sims)), key=lambda i: sims[i])
             context_recall_proxy = _cosine_similarity(gt_vec, chunk_vecs[best_idx])
@@ -344,8 +349,8 @@ def _build_answer_user_message(question: str, chunks: List[dict]) -> str:
 
 def cost_guard(n_cases: int, skip_confirmation: bool) -> bool:
     """Print the cost estimate and, above threshold, block on user confirmation."""
-    generation_calls = n_cases
-    ragas_internal_calls = n_cases * 5
+    generation_calls = n_cases  # one gpt-4o answer-generation call per case
+    ragas_internal_calls = n_cases * 5  # ~5 judge calls/case across the 4 RAGAS metrics
     total = generation_calls + ragas_internal_calls
     print(
         f"\nCost estimate: {generation_calls} answer-generation call(s) (gpt-4o) + "
@@ -374,6 +379,8 @@ def generate_grounded_answers(cases: List[dict], args: argparse.Namespace) -> Li
         chunks = run_retrieval(case["question"], case.get("source_collection", ""), args.bi_encoder_top_n, args.rerank_top_k)
         contexts = [c.get("text", "") for c in chunks]
 
+        # No chunks retrieved → nothing to ground an answer in; skip rather than
+        # score a context-less generation as if it were a real RAG failure mode.
         if not chunks:
             records.append(
                 {
@@ -454,7 +461,13 @@ def _build_ragas_llm_and_embeddings():
 
 
 def run_ragas_evaluate(evaluated_records: List[dict]):
-    """Build the ragas Dataset from evaluated (non-skipped) records and run evaluate()."""
+    """Build the ragas Dataset from evaluated (non-skipped) records and run evaluate().
+
+    Deprecation warnings are suppressed only around the ragas/metrics import and the
+    evaluate() call itself — ragas 0.4.3 still uses the classic `ragas.metrics.*`
+    objects internally, which warn about the newer `ragas.metrics.collections` API;
+    the call shape used here is deliberately kept stable rather than migrated.
+    """
     from datasets import Dataset
 
     with warnings.catch_warnings():
@@ -497,6 +510,7 @@ def _group_by_full(rows: List[dict], key: str) -> Dict[str, dict]:
 
 
 def flag_weak_collections(by_collection: Dict[str, dict]) -> List[dict]:
+    """Compare each collection's per-metric average against TARGET_METRICS; return sub-target pairs, worst gap first."""
     flagged = []
     for collection, scores in by_collection.items():
         for metric, target in TARGET_METRICS.items():

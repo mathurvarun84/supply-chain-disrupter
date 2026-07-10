@@ -210,9 +210,9 @@ run_agent_graph() tries:
 
 ## MCP Servers
 
-The project includes two **Model Context Protocol (MCP)** servers that expose weather and news data as tool-callable APIs. These demonstrate the MCP pattern where an L1 agent can call structured tools instead of calling APIs directly.
+The project includes two **Model Context Protocol (MCP)** servers that expose weather and news data as tool-callable APIs. Both servers use `FastMCP` (from the `mcp` package) and can run standalone over **stdio transport** for MCP-client demos.
 
-Both servers use `FastMCP` (from the `mcp` package) and run over **stdio transport**.
+**L1 wiring:** `DataIngestionAgent` also calls each server's underlying tool function directly, in-process, as two additional connectors — `WeatherMcpConnector` and `NewsMcpConnector` (`src/utils/ingestion_connectors.py`), registered alongside the existing hub-city connectors in `_run_all_connectors()`. This reuses `fetch_hub_weather()`/`fetch_news_headlines()` as plain Python calls rather than spawning the servers as MCP subprocesses, avoiding stdio/process-management overhead for what is otherwise an in-process batch job. Both write to the same `live_weather_ingest`/`live_news_ingest` tables as their RSS/Open-Meteo counterparts (tagged `source=weather_mcp` / `source_feed=news_mcp` in `ingestion_run_log`), so results from both paths can be compared before either RSS/Open-Meteo hub-city path is retired.
 
 ### `news_mcp.py` — Supply Chain News MCP Server
 
@@ -270,7 +270,19 @@ Flow inside the tool:
                weather_code, temperature_c, raw_severity_score }
 ```
 
-**Note:** The MCP weather severity (0–10) is a *different scale* from the L1 batch poller severity (0.0–1.0). The MCP server is used for direct tool-call demos; the batch poller's 0–1 scale feeds the actual risk formula in L4.
+**Note:** The MCP weather severity (0–10) is a *different scale* from the L1 batch poller severity (0.0–1.0). `WeatherMcpConnector` persists the raw 0–10 score into `live_weather_ingest` unchanged (matching `OpenMeteoEnhancedConnector`'s hub-city path); the 0–1 batch poller scale in `weather_events` is what feeds the actual risk formula in L4.
+
+### Guardrails on ingested rows
+
+`DataValidator` (`src/utils/ingestion_validator.py`) enforces two checks that used to be advisory-only and now actively reject data:
+
+- **Outlier (Z-score):** `check_outlier_zscore` flags any bounded numeric field (`derived_weather_severity`, `normalized_sdi`, `normalized_chip_price_index`) whose value is `|z| > 3.0` against its table's recent history. Flagged rows are **not persisted** — they're written to `ingestion_quarantine` instead via `DataValidator.quarantine_row()`.
+- **Enrichment conflict:** `check_enrichment_conflict` now returns the list of `live_enrichment` fields that shifted too sharply vs. the previous row (`weather_severity_live` > 0.5 absolute shift, `supply_disruption_index_live` > 30% relative shift). `DataIngestionAgent._build_live_enrichment()` holds back each flagged field — keeping the prior value instead of overwriting it — and quarantines the rejected value.
+- **Circuit breaker:** `DataIngestionAgent._is_circuit_open()` skips a connector for one run (logged as `status=circuit_open` in `ingestion_run_log`) if its last 3 consecutive runs all failed.
+
+Quarantined rows and circuit-breaker state are surfaced in the Streamlit "Live Data Feed" page (`src/dashboard/ingestion_dashboard.py`).
+
+**Note on `FredConnector`:** it fetches the *entire* historical PPI CSV (back to 1974) on every run rather than incrementally — `get_last_fetched_key("fred_WPSFD4131")` never matches because runs are logged under `SOURCE_NAME = "fred"`, a pre-existing key mismatch. Combined with the outlier guardrail, older CSV rows (economically out of range vs. the recent baseline) are quarantined on every run rather than persisted once and skipped as duplicates thereafter. This doesn't affect L4 risk scoring (`_build_live_enrichment` only reads the latest `freight_signals` row), but it is wasted work worth fixing separately.
 
 ---
 
@@ -426,19 +438,43 @@ Flow:
 
 ## L6 — Monte Carlo Simulation
 
-**Module:** `src/agents/langgraph_engine.py:simulation_agent()`
+**Module:** `src/agents/simulation_agent/` (`agent.py`, `engine.py`, `priors.py`)
 
-A deterministic approximation (no actual Monte Carlo sampling) that estimates stockout risk from inventory levels and composite risk score.
+L6 runs a **Monte Carlo discrete-time inventory simulation** (default 2,000 trials,
+set per scenario in the Streamlit Scenario Analyzer form via `simulation_trials`).
+Each trial samples stochastic lead time,
+demand (optionally from L5 Prophet forecast), supplier reliability, and disruption
+duration, then simulates daily inventory balance over the scenario recovery window.
 
 ```
-stockout_probability = composite_score × 100
-                     + (1 - inventory/incoming) × 25
-                     + (lead_time_days/30) × 25
-                     (capped at 100%)
+Inputs (from GlobalState):
+  active_record — inventory_level, incoming_supply, lead_time_days, demand, unit_price_usd
+  risk_classification — composite_score
+  forecast_result — 30-day Prophet demand path (optional)
+  event_metadata — severity, shock_duration_days, recovery_window_days, disruption_type
+  news_analysis_llm — expected_duration_days (duration prior fallback)
+  config — region_route_maps / route_maps for alternate_route
+
+Per trial:
+  1. Sample lead time (lognormal, inflated by severity + supply_disruption_index)
+  2. Sample disruption duration from shock_duration_days or news LLM estimate
+  3. Daily inventory balance: demand shock during disruption, inbound after lead time
+  4. Track stockout day, unmet demand, revenue loss
+
+Aggregates:
+  stockout_probability_pct     — fraction of trials with stockout × 100
+  stockout_probability_p10/p90 — severity score percentiles
+  revenue_impact_usd_p10/p50/p90
+  days_to_stockout_p10/p50/p90
+  expected_inventory_gap_pct, alternate_route, trials_run, model_version
+
+Persistence: simulation_runs table (insert_simulation_run in db_utils.py)
 
 Output: GlobalState.simulation_result
-  { stockout_probability_pct, expected_inventory_gap_pct, alternate_route }
 ```
+
+On failure, L6 falls back to a deterministic heuristic and still attempts persistence.
+L6 is optional — failures are caught by `_optional_node` and do not block L7.
 
 ---
 
@@ -716,6 +752,7 @@ python evaluation/qa_05_live_mode_taiwan_earthquake.py
 python evaluation/qa_09_l2_l3_real_ingest_smoke.py
 python evaluation/qa_10_taiwan_earthquake_l2_l3_scenario.py
 python evaluation/qa_11_langgraph_l1_l2_l3_integration.py
+python evaluation/qa_12_simulation_agent.py
 ```
 
 | Script | Layer | Purpose |
@@ -723,5 +760,6 @@ python evaluation/qa_11_langgraph_l1_l2_l3_integration.py
 | `qa_09_l2_l3_real_ingest_smoke.py` | L2, L3 | Real `news_signals` / `weather_signals` SQLite reads; blocks live APIs |
 | `qa_10_taiwan_earthquake_l2_l3_scenario.py` | L2, L3 | Documented Taiwan earthquake scenario (report-friendly PASS/FAIL) |
 | `qa_11_langgraph_l1_l2_l3_integration.py` | L1→L2→L3 | State propagation on a real `daily_records` row |
+| `qa_12_simulation_agent.py` | L6, L7 | Monte Carlo impact ranges + `simulation_runs` persistence |
 
 Unit tests (`tests/test_news_weather_agents_v2.py`) cover agent contracts with mocks. QA scripts add real-DB wiring checks and capstone evaluation artifacts.
