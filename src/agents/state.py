@@ -201,9 +201,12 @@ class MitigationLLMOutput(BaseModel):
         description="At least 1 citation from provided RAG context.",
     )
     india_sourcing_recommendations: List[str] = Field(
-        ...,
-        min_length=1,
-        description="At least 1 named India/ASEAN option.",
+        default_factory=list,
+        description=(
+            "Named India/ASEAN option(s) that genuinely match the affected commodity/product "
+            "category in the RAG context. Empty list when no real fit exists — never force a "
+            "facility or scheme onto an unrelated commodity."
+        ),
     )
 
 

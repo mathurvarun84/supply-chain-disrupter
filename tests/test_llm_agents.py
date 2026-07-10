@@ -195,28 +195,87 @@ def test_canceled_shipment_floor_when_llm_disagrees():
     assert rc.critical_flag is True
 
 
-def test_mitigation_agent_rule_based():
-    """Mitigation agent produces rule-based actions from risk classification."""
-    from src.agents.mitigation_agent import mitigation_recommendation_agent
-
+def _mitigation_state(risk_label="HIGH", critical_flag=False):
     risk = RiskClassificationResult(
         mode="live", composite_score=0.55,
         geo_component=0.4, supply_component=0.5, freight_component=0.6, defect_component=0.4,
-        duration_days=None, base_label="HIGH", final_label="HIGH",
-        escalated=False, rationale="test", critical_flag=False,
+        duration_days=None, base_label=risk_label, final_label=risk_label,
+        escalated=False, rationale="test", critical_flag=critical_flag,
     )
-    state = GlobalState(
-        event_metadata=__import__("src.agents.state", fromlist=["EventMetadata"]).EventMetadata(
+    from src.agents.state import EventMetadata
+
+    return GlobalState(
+        event_metadata=EventMetadata(
             disruption_type="port closure", affected_port="Rotterdam", affected_route="test",
             severity=0.6, shock_duration_days=0, recovery_window_days=60, synthetic_ratio=0.0,
         ),
         active_record={"event_date": "2024-01-01", "port": "Rotterdam", "sku": "CHIP_AP"},
         risk_classification=risk,
     )
-    with patch("src.agents.mitigation_agent.insert_mitigation_action"):
-        result = mitigation_recommendation_agent(state)
+
+
+def test_mitigation_agent_rule_based():
+    """Mitigation agent produces rule-based actions when no API key is set."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state()
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=False):
+        with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+            result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
+    assert result["mitigation_llm"] is None
     assert "HIGH" in action.summary
+    assert len(action.recommendations) == 3
+    assert "stockout" in action.recommendations[0].lower()
+    assert action.rag_citations == []
+    assert action.india_sourcing_recommendations == []
+
+
+def test_mitigation_agent_llm_success():
+    """Mitigation agent uses GPT-4o + RAG output when the LLM call succeeds."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state(risk_label="CRITICAL", critical_flag=True)
+    mock_output = MitigationLLMOutput(
+        summary="CRITICAL port closure risk requires immediate diversion.",
+        ranked_actions=[
+            "Divert shipments via Cape of Good Hope.",
+            "Raise safety stock on exposed SKUs.",
+            "Activate India OSAT capacity as an alternate.",
+        ],
+        cost_estimate="HIGH: expedited freight required.",
+        urgency="IMMEDIATE",
+        rag_citations=["historical_precedents: red_sea_disruption_2023_2024.txt"],
+        india_sourcing_recommendations=["CG Power-Kaynes OSAT (India) as back-end alternate."],
+    )
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value="(context)"):
+            with patch("src.agents.mitigation_agent.call_openai_structured", return_value=mock_output):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    assert result["mitigation_llm"] is mock_output
+    assert action.urgency == "IMMEDIATE"
+    assert action.rag_citations == mock_output.rag_citations
+    assert action.india_sourcing_recommendations == mock_output.india_sourcing_recommendations
+    assert action.recommendations == mock_output.ranked_actions
+
+
+def test_mitigation_agent_llm_failure_falls_back():
+    """Mitigation agent falls back to rule-based output when the LLM call raises."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state()
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value="(context)"):
+            with patch(
+                "src.agents.mitigation_agent.call_openai_structured",
+                side_effect=RuntimeError("rate limit"),
+            ):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    assert result["mitigation_llm"] is None
     assert len(action.recommendations) == 3
     assert "stockout" in action.recommendations[0].lower()
 
