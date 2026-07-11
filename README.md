@@ -124,7 +124,7 @@ python -m src.agents.data_ingestion.cli --news
 TLS verification stays on by default; the RSS fallback still returns news even
 when GDELT is blocked, so the news table is never left empty.
 
-## Run the application
+## Run the application (Streamlit — original dashboard)
 
 ```powershell
 python -m streamlit run src/main.py
@@ -145,7 +145,54 @@ The application contains three pages:
    date; calculate risk, run a Prophet forecast, estimate stockout exposure,
    and persist mitigation guidance.
 
-## Typical workflow
+## Run the application (React dashboard — FastAPI + Vite)
+
+The command center UI is a React app (`src/frontend/`) backed by a FastAPI
+server (`src/api/main.py`). Both must be running at the same time, on fixed
+ports, or the UI shows "couldn't load data":
+
+- Backend: `http://127.0.0.1:8173`
+- Frontend: `http://127.0.0.1:5173`
+
+The Vite dev server proxies every `/api/*` request straight to the backend
+(see `src/frontend/vite.config.ts`), so the frontend needs **no `.env` file**
+to find the API — it works the same on every machine out of the box.
+
+**One-time setup** (creates the venv, installs Python deps, installs npm
+deps):
+
+```powershell
+.\scripts\setup.ps1
+```
+
+**Every time you want to run it**, open two terminals from the project root:
+
+```powershell
+# Terminal 1 — backend (must stay on port 8173)
+.\scripts\run_backend.ps1
+
+# Terminal 2 — frontend (must stay on port 5173)
+.\scripts\run_frontend.ps1
+```
+
+Then open `http://localhost:5173`. If a port is already in use, the scripts
+will fail loudly instead of silently switching ports (a common cause of
+"can't connect to backend") — free the port or stop the other process first.
+
+Prefer to run the commands directly instead of the scripts?
+
+```powershell
+# Backend — run from the project root so relative paths (outputs/, data/, config/) resolve
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8173 --reload
+
+# Frontend
+cd src/frontend
+npm install   # first time only
+npm run dev
+```
+
+## Typical workflow (Streamlit path)
 
 ```powershell
 cd D:\supply-chain-disrupter
@@ -211,6 +258,25 @@ python -m src.build_databases
 
 The first ChromaDB build downloads `all-MiniLM-L6-v2` from Hugging Face. A
 Hugging Face token is optional; the model can be downloaded anonymously.
+
+### React UI says "couldn't load data" / can't connect to backend
+
+This means the FastAPI backend isn't running on port 8173, or something else
+is already bound to port 5173 or 8173. Check:
+
+```powershell
+# Is the backend actually up?
+curl http://127.0.0.1:8173/api/health
+
+# Anything already using the ports?
+netstat -ano | findstr ":8173"
+netstat -ano | findstr ":5173"
+```
+
+Stop whatever is holding the port (or restart with `.\scripts\run_backend.ps1`
+/ `.\scripts\run_frontend.ps1`, which fail fast instead of silently switching
+ports). The frontend does not need a `.env.local` file — it talks to the
+backend through the Vite proxy, not a configured URL.
 
 ### Scenario weather request fails
 

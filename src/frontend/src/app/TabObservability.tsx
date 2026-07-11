@@ -5,8 +5,7 @@ import {
   PieChart, Pie, Cell, ResponsiveContainer,
 } from "recharts";
 import { usePipelineStatus } from "./hooks/usePipelineStatus";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
+import { API_BASE_URL } from "./api/config";
 
 // ── Shared style tokens (matches App.mockup.tsx) ──────────────────────────
 const BG     = "#070D18";

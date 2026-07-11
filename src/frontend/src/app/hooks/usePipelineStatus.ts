@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { AgentStatus } from "../components/AgentNode";
+import { API_BASE_URL } from "../api/config";
 
 export interface AgentState {
   id: string;
@@ -15,8 +16,6 @@ export interface PipelineStatus {
   openai_status: "connected" | "disconnected";
   langfuse_trace_url: string | null;
 }
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
 
 async function fetchPipelineStatus(): Promise<PipelineStatus> {
   const res = await fetch(`${API_BASE_URL}/api/pipeline/status`);
