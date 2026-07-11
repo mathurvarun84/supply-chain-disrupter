@@ -9,6 +9,16 @@ scenarios, so it can't drive run_with_trulens. These two scenarios mirror
 the real payload shape used by the Streamlit Scenario Analyzer at
 src/dashboard/dashboard.py:216-229.
 
+`affected_port`/`sku`/`event_date` must be an EXACT match against a real
+`daily_records` row (verified via `SELECT DISTINCT port, sku, event_date
+FROM daily_records`) — L1 finds no active_record on a non-match, and L3's
+get_port_coordinates() only resolves the 7 India ports in
+config/india_electronics.yaml when active_record has no lat/lon of its own
+(a row that matched supplies its own). Discovered during Task 13 manual
+verification: the original placeholder values ("Eastern Asia"/"CHIP_AP"/
+"2024-04-03", styled after a Taiwan-earthquake scenario) don't exist in the
+real workbook and raised KeyError/ValueError instead of running.
+
 Usage: python -m evaluation.trulens_runner
 """
 
@@ -26,22 +36,22 @@ OUTPUT_PATH = Path(__file__).parent / "trulens_scores.json"
 
 SCENARIOS: list[dict] = [
     {
-        "name": "taiwan_earthquake",
+        "name": "central_america_earbuds",
         "payload": {
-            "disruption_type": "earthquake",
-            "affected_port": "Eastern Asia",
-            "affected_route": "Hsinchu to Singapore",
-            "severity": 0.95,
-            "shock_duration_days": 6,
-            "recovery_window_days": 90,
+            "disruption_type": "logistics",
+            "affected_port": "Central America",
+            "affected_route": "Panama Canal to Central America",
+            "severity": 0.6,
+            "shock_duration_days": 3,
+            "recovery_window_days": 30,
             "synthetic_ratio": 0.0,
             "simulation_trials": 500,
-            "sku": "CHIP_AP",
-            "event_date": "2024-04-03",
+            "sku": "Samsung Galaxy Buds Wireless Earbuds",
+            "event_date": "2015-01-01",
         },
     },
     {
-        "name": "red_sea_crisis",
+        "name": "western_europe_laptop",
         "payload": {
             "disruption_type": "geopolitical",
             "affected_port": "Western Europe",
@@ -51,8 +61,8 @@ SCENARIOS: list[dict] = [
             "recovery_window_days": 120,
             "synthetic_ratio": 0.0,
             "simulation_trials": 500,
-            "sku": "ELECTRONICS_EU",
-            "event_date": "2024-01-15",
+            "sku": "HP Spectre x360 14",
+            "event_date": "2025-12-29",
         },
     },
 ]
