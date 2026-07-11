@@ -229,6 +229,28 @@ def test_mitigation_agent_rule_based():
     assert "stockout" in action.recommendations[0].lower()
     assert action.rag_citations == []
     assert action.india_sourcing_recommendations == []
+    # Same vocabulary/format the LLM path uses — never the old CRITICAL/MODERATE strings.
+    assert action.urgency == "HIGH"
+    assert action.cost_delta.startswith("MEDIUM:")
+
+
+def test_mitigation_agent_rule_based_urgency_matches_llm_vocabulary():
+    """Rule-based urgency must use the same IMMEDIATE/HIGH/MEDIUM/LOW scale as the LLM path,
+    computed by the same shared function, for every risk label."""
+    from src.agents.mitigation_agent import _min_required_urgency, _rule_based_action
+
+    for risk_label, expected in [
+        ("CRITICAL", "IMMEDIATE"),
+        ("HIGH", "HIGH"),
+        ("MEDIUM", "MEDIUM"),
+        ("LOW", "LOW"),
+    ]:
+        state = _mitigation_state(risk_label=risk_label)
+        assert _min_required_urgency(state) == expected
+        action = _rule_based_action(state, state.active_record)
+        assert action.urgency == expected
+        level = action.cost_delta.split(":", 1)[0]
+        assert level in ("HIGH", "MEDIUM", "LOW")
 
 
 _FAKE_RAG_CONTEXT = (
@@ -284,6 +306,19 @@ def test_mitigation_agent_llm_success():
     assert action.rag_citations == mock_output.rag_citations
     assert action.india_sourcing_recommendations == mock_output.india_sourcing_recommendations
     assert action.recommendations == mock_output.ranked_actions
+
+
+def test_mitigation_llm_output_allows_fewer_than_three_actions():
+    """A genuinely low-risk plan may return 1-2 actions instead of being padded to a minimum of 3."""
+    minimal_output = MitigationLLMOutput(
+        summary="Routine monitoring is sufficient.",
+        ranked_actions=["Monitor weekly fill rates for early signs of escalation."],
+        cost_estimate="LOW: no incremental spend required.",
+        urgency="LOW",
+        rag_citations=[],
+        india_sourcing_recommendations=[],
+    )
+    assert len(minimal_output.ranked_actions) == 1
 
 
 def test_mitigation_agent_llm_failure_falls_back():

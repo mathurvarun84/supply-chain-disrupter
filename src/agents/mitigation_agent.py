@@ -125,7 +125,9 @@ an India facility here would be a fabricated fit, so the list is correctly left 
 </example>
 
 OUTPUT RULES:
-- ranked_actions: 3-5 specific, procurement-actionable items, most urgent first
+- ranked_actions: 1-5 specific, procurement-actionable items, most urgent first — do not pad
+  with low-value filler to hit a minimum; a genuinely low-risk scenario may warrant only 1-2
+  actions
 - rag_citations: cite ONLY sources that are actually present in the RAG context provided below —
   never invent a citation. Empty list is acceptable when no retrieved chunk is a genuine fit; any
   citation naming a source not present in the context is discarded downstream regardless.
@@ -208,9 +210,11 @@ _URGENCY_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "IMMEDIATE": 3}
 
 def _min_required_urgency(state: GlobalState) -> str:
     """
-    Deterministic urgency floor mirroring _rule_based_action's escalation logic.
-    The LLM's urgency is a recommendation only — it is clamped up to this floor, never trusted
-    verbatim, so a CRITICAL risk label or high tail-risk simulation can't be silently under-escalated.
+    Deterministic urgency computation, shared by both paths — the single source of truth for
+    escalation. The rule-based path uses this directly as its urgency; the LLM path uses it as
+    a floor, clamping the model's own (possibly under-escalated) urgency up to it, never trusting
+    the model verbatim. A CRITICAL risk label or high tail-risk simulation therefore can't be
+    silently under-escalated in either path, and both paths always speak the same vocabulary.
     """
     sim = state.simulation_result
     stockout_p90 = sim.stockout_probability_p90 if sim else None
@@ -229,6 +233,15 @@ def _clamp_urgency(llm_urgency: str, floor: str) -> str:
     if _URGENCY_RANK.get(llm_urgency, 0) < _URGENCY_RANK[floor]:
         return floor
     return llm_urgency
+
+
+def _cost_delta_for_urgency(urgency: str) -> str:
+    """Shared HIGH/MEDIUM/LOW cost-tier text, format-matched to the LLM path's cost_estimate."""
+    if urgency == "IMMEDIATE":
+        return "HIGH: expedite critical inventory and activate alternate sourcing."
+    if urgency == "HIGH":
+        return "MEDIUM: reserve backup logistics and inventory capacity."
+    return "LOW: monitor and maintain standard buffers; no immediate spend required."
 
 
 def _llm_output_to_action(llm_output: MitigationLLMOutput) -> MitigationAction:
@@ -303,21 +316,9 @@ def _rule_based_action(state: GlobalState, record: dict) -> MitigationAction:
         f"Review alternate suppliers — forecast variance: {forecast_note}; estimated revenue at risk (P50): {revenue_note}.",
     ]
 
-    urgency = "HIGH"
-    if state.risk_label == "CRITICAL":
-        urgency = "CRITICAL"
-    elif stockout_p90 is not None and stockout_p90 > TAIL_RISK_P90_THRESHOLD:
-        urgency = "CRITICAL"
-    elif state.risk_label in ("HIGH", "CRITICAL"):
-        urgency = "HIGH"
-    else:
-        urgency = "MODERATE"
-
-    cost_delta = (
-        "High: expedite critical inventory and activate alternate sourcing."
-        if urgency == "CRITICAL"
-        else "Moderate: reserve backup logistics and inventory capacity."
-    )
+    # Same escalation logic and vocabulary the LLM path is clamped to — see _min_required_urgency.
+    urgency = _min_required_urgency(state)
+    cost_delta = _cost_delta_for_urgency(urgency)
 
     return MitigationAction(
         summary=(

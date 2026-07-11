@@ -183,9 +183,13 @@ class MitigationLLMOutput(BaseModel):
     )
     ranked_actions: List[str] = Field(
         ...,
-        min_length=3,
+        min_length=1,
         max_length=5,
-        description="3-5 specific actions, most urgent first.",
+        description=(
+            "1-5 specific, procurement-actionable items, most urgent first. Do not pad with "
+            "low-value filler to hit a minimum — a genuinely low-risk scenario may warrant "
+            "only 1-2 actions."
+        ),
     )
     cost_estimate: str = Field(
         ...,
