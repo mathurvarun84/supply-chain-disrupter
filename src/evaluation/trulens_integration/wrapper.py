@@ -29,12 +29,16 @@ session.force_flush() afterward is best-effort/non-blocking.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
 from typing import Any, Dict
 
+from opentelemetry import trace as ot_trace
 from trulens.apps.app import TruApp, instrument
+from trulens.core.otel.instrument import set_user_defined_attributes
+from trulens.otel.semconv.trace import SpanAttributes
 
 from src.agents.langgraph_engine import build_agent_graph
 from src.agents.state import GlobalState
@@ -79,10 +83,31 @@ def _pipeline_body(payload: Dict[str, Any], run_id: str) -> tuple[GlobalState, D
     return state, labeled_latencies, llm_calls
 
 
+def _aggregate_llm_cost(llm_calls: list[LLMCallRecord]) -> Dict[str, Any]:
+    """Sum tokens/cost across one run's LLM calls for TruLens's SpanAttributes.COST.*.
+
+    None fields (failed calls in openai_patch.py leave tokens/cost as None)
+    count as zero rather than breaking the sum.
+    """
+    return {
+        "prompt_tokens": sum(c.input_tokens or 0 for c in llm_calls),
+        "completion_tokens": sum(c.output_tokens or 0 for c in llm_calls),
+        "cost_usd": round(sum(c.cost_usd or 0.0 for c in llm_calls), 6),
+        "models": sorted({c.model for c in llm_calls if c.model}),
+    }
+
+
 class _PipelineRunner:
     """Holds one run's result so the @instrument-decorated span has a plain
-    method to wrap; TruApp records args/return value of `run()` as the span's
-    root input/output automatically."""
+    method to wrap. TruApp auto-captures run()'s args/return value as the
+    span's root input/output, but only for simple (string) types — a dict
+    return value shows up as an empty output in the dashboard, and any
+    manual override of record_root.input/output set mid-call gets
+    overwritten by @instrument's own post-call finalization (both verified
+    against the installed trulens-core 2.8.1). So run() returns a plain
+    risk-label string for a readable "Output" column, and cost/token/scenario
+    detail is attached via set_user_defined_attributes under distinct keys
+    that @instrument doesn't touch."""
 
     def __init__(self) -> None:
         self.final_state: GlobalState | None = None
@@ -90,19 +115,32 @@ class _PipelineRunner:
         self.llm_calls: list[LLMCallRecord] = []
 
     @instrument
-    def run(self, payload: Dict[str, Any], run_id: str) -> Dict[str, Any]:
+    def run(self, payload: Dict[str, Any], run_id: str) -> str:
         state, node_latencies_ms, llm_calls = _pipeline_body(payload, run_id)
         self.final_state = state
         self.node_latencies_ms = node_latencies_ms
         self.llm_calls = llm_calls
-        return {
-            "risk_label": state.risk_label,
-            "composite_score": state.risk_score_composite,
-            "node_latencies_ms": node_latencies_ms,
-            "llm_call_count": len(llm_calls),
-            "l4_signals": extract_l4_signals(state),
-            "l5_forecast": extract_l5_forecast(state),
-        }
+
+        cost_summary = _aggregate_llm_cost(llm_calls)
+        try:
+            span = ot_trace.get_current_span()
+            set_user_defined_attributes(span, attributes={
+                SpanAttributes.COST.COST: cost_summary["cost_usd"],
+                SpanAttributes.COST.CURRENCY: "USD",
+                SpanAttributes.COST.NUM_PROMPT_TOKENS: cost_summary["prompt_tokens"],
+                SpanAttributes.COST.NUM_COMPLETION_TOKENS: cost_summary["completion_tokens"],
+                "supply_chain.scenario": (
+                    f"port={payload.get('affected_port', '?')} "
+                    f"sku={payload.get('sku', '?')} event_date={payload.get('event_date', '?')}"
+                ),
+                "supply_chain.node_latencies_ms": json.dumps(node_latencies_ms),
+                "supply_chain.l4_signals": json.dumps(extract_l4_signals(state)),
+                "supply_chain.l5_forecast": json.dumps(extract_l5_forecast(state)),
+            })
+        except Exception as exc:
+            logger.warning("TruLens span attribute capture failed (non-blocking) for run_id=%s: %s", run_id, exc)
+
+        return state.risk_label or "UNKNOWN"
 
 
 def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
@@ -118,6 +156,19 @@ def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
     # Discovered during Task 13 manual verification.
     ensure_schema()
 
+    # get_session() MUST be called before TruApp() is constructed. TruLens's
+    # TruSession is a process-wide singleton registered lazily — if no
+    # session has been created yet, TruApp() silently creates its own
+    # default one pointed at sqlite:///default.sqlite in the CWD instead of
+    # data/trulens/trulens.db, and every span records successfully into the
+    # wrong file with no error anywhere in the chain. Discovered by
+    # comparing the exact same attribute-setting code (which worked in an
+    # isolated smoke test that called get_session() first) against
+    # run_with_trulens() silently writing to ./default.sqlite instead.
+    from src.evaluation.trulens_integration.config import get_session
+
+    session = get_session()
+
     run_id = payload.get("run_id") or str(uuid.uuid4())
     runner = _PipelineRunner()
     tru_app = TruApp(runner, app_name="supply_chain_pipeline", app_version="v1", main_method=runner.run)
@@ -126,9 +177,7 @@ def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
         runner.run(payload, run_id)
 
     try:
-        from src.evaluation.trulens_integration.config import get_session
-
-        get_session().force_flush()
+        session.force_flush()
     except Exception as exc:
         logger.warning("TruLens flush failed (non-blocking) for run_id=%s: %s", run_id, exc)
 

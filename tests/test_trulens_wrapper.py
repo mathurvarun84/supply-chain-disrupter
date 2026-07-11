@@ -7,7 +7,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.agents.state import GlobalState
-from src.evaluation.trulens_integration.wrapper import _pipeline_body, run_with_trulens
+from src.evaluation.trulens_integration.openai_patch import LLMCallRecord
+from src.evaluation.trulens_integration.wrapper import (
+    _aggregate_llm_cost, _pipeline_body, run_with_trulens,
+)
 
 
 class _FakeCompiledGraph:
@@ -131,6 +134,101 @@ def test_run_with_trulens_records_a_real_trulens_event():
     finally:
         conn.close()
     assert count > 0
+
+
+def _llm_call(input_tokens, output_tokens, cost_usd, model="gpt-4o"):
+    return LLMCallRecord(
+        run_id="r", agent_name="L2_news", model=model, system_prompt="s", user_message="u",
+        latency_ms=100.0, input_tokens=input_tokens, output_tokens=output_tokens,
+        cost_usd=cost_usd, status="success", parsed_output=None,
+    )
+
+
+def test_aggregate_llm_cost_sums_across_calls():
+    calls = [_llm_call(100, 50, 0.001), _llm_call(200, 80, 0.002, model="gpt-4.1-mini")]
+    summary = _aggregate_llm_cost(calls)
+    assert summary["prompt_tokens"] == 300
+    assert summary["completion_tokens"] == 130
+    assert summary["cost_usd"] == pytest.approx(0.003)
+    assert summary["models"] == ["gpt-4.1-mini", "gpt-4o"]
+
+
+def test_aggregate_llm_cost_handles_empty_list():
+    summary = _aggregate_llm_cost([])
+    assert summary == {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "models": []}
+
+
+def test_aggregate_llm_cost_treats_none_fields_as_zero():
+    # openai_patch.py's LLMCallRecord leaves tokens/cost as None on a failed call
+    calls = [_llm_call(None, None, None)]
+    summary = _aggregate_llm_cost(calls)
+    assert summary == {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "models": ["gpt-4o"]}
+
+
+def test_run_with_trulens_calls_get_session_before_constructing_tru_app():
+    # Regression test: TruApp() constructed before get_session() silently
+    # creates its own default TruSession pointed at sqlite:///default.sqlite
+    # in the CWD instead of data/trulens/trulens.db, with no error anywhere
+    # in the chain — get_session() must be called first. get_session() is
+    # @lru_cache'd, so a plain "was it called" assertion would pass whether
+    # or not call order was fixed (an earlier test may have already warmed
+    # the cache) — this asserts the actual order instead.
+    call_order = []
+
+    def fake_get_session():
+        call_order.append("get_session")
+        return MagicMock()
+
+    def fake_tru_app(*args, **kwargs):
+        call_order.append("TruApp")
+        return MagicMock(__enter__=MagicMock(), __exit__=MagicMock(return_value=False))
+
+    with patch(
+        "src.evaluation.trulens_integration.wrapper.build_agent_graph",
+        return_value=_FakeCompiledGraph(),
+    ):
+        with patch("src.evaluation.trulens_integration.config.get_session", fake_get_session):
+            with patch("src.evaluation.trulens_integration.wrapper.TruApp", fake_tru_app):
+                run_with_trulens({"sku": "CHIP_AP", "event_date": "2024-04-03"})
+
+    assert call_order == ["get_session", "TruApp"]
+
+
+def test_run_with_trulens_records_cost_and_token_span_attributes():
+    import json
+    import sqlite3
+
+    from src.evaluation.trulens_integration.config import DB_PATH, get_session
+
+    fake_calls = [_llm_call(400, 100, 0.0042, model="gpt-4o")]
+
+    with patch(
+        "src.evaluation.trulens_integration.wrapper._pipeline_body",
+        return_value=(GlobalState(risk_classification=None), {"L2": 1000.0, "total": 1000.0}, fake_calls),
+    ):
+        run_with_trulens({
+            "affected_port": "Chennai", "sku": "CHIP_AP", "event_date": "2024-04-03",
+            "run_id": "cost-attr-test-run",
+        })
+
+    get_session().force_flush()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT record_attributes FROM trulens_events "
+            "WHERE record_attributes LIKE '%cost-attr-test-run%' "
+            "AND record_attributes LIKE '%record_root%' "
+            "ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    attrs = json.loads(row[0])
+    assert attrs["ai.observability.cost.cost"] == pytest.approx(0.0042)
+    assert attrs["ai.observability.cost.cost_currency"] == "USD"
+    assert attrs["ai.observability.cost.num_prompt_tokens"] == 400
+    assert attrs["ai.observability.cost.num_completion_tokens"] == 100
 
 
 def test_run_with_trulens_lets_node_exceptions_propagate():
