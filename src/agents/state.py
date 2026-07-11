@@ -183,9 +183,13 @@ class MitigationLLMOutput(BaseModel):
     )
     ranked_actions: List[str] = Field(
         ...,
-        min_length=3,
+        min_length=1,
         max_length=5,
-        description="3-5 specific actions, most urgent first.",
+        description=(
+            "1-5 specific, procurement-actionable items, most urgent first. Do not pad with "
+            "low-value filler to hit a minimum — a genuinely low-risk scenario may warrant "
+            "only 1-2 actions."
+        ),
     )
     cost_estimate: str = Field(
         ...,
@@ -196,14 +200,20 @@ class MitigationLLMOutput(BaseModel):
         description="IMMEDIATE=CRITICAL label, HIGH=HIGH label, etc.",
     )
     rag_citations: List[str] = Field(
-        ...,
-        min_length=1,
-        description="At least 1 citation from provided RAG context.",
+        default_factory=list,
+        description=(
+            "Citations naming sources actually present in the provided RAG context. Empty list "
+            "is valid when no retrieved chunk is a genuine fit — never invent a source; fabricated "
+            "citations are filtered out downstream against the real retrieved sources."
+        ),
     )
     india_sourcing_recommendations: List[str] = Field(
-        ...,
-        min_length=1,
-        description="At least 1 named India/ASEAN option.",
+        default_factory=list,
+        description=(
+            "Named India/ASEAN option(s) that genuinely match the affected commodity/product "
+            "category in the RAG context. Empty list when no real fit exists — never force a "
+            "facility or scheme onto an unrelated commodity."
+        ),
     )
 
 

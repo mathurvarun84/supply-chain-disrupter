@@ -344,6 +344,7 @@ def show_scenario_analyzer() -> None:
     # ── Mitigation ────────────────────────────────────────────────────────────
     if result.mitigation_action:
         st.subheader("Mitigation Recommendation")
+        st.caption("GPT-4o + RAG (L7)" if result.mitigation_llm else "Rule-based fallback (L7)")
         st.write(result.mitigation_action.summary)
         for rec in result.mitigation_action.recommendations:
             st.markdown(f"- {rec}")

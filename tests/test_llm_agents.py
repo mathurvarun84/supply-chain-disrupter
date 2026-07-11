@@ -195,30 +195,262 @@ def test_canceled_shipment_floor_when_llm_disagrees():
     assert rc.critical_flag is True
 
 
-def test_mitigation_agent_rule_based():
-    """Mitigation agent produces rule-based actions from risk classification."""
-    from src.agents.mitigation_agent import mitigation_recommendation_agent
-
+def _mitigation_state(risk_label="HIGH", critical_flag=False):
     risk = RiskClassificationResult(
         mode="live", composite_score=0.55,
         geo_component=0.4, supply_component=0.5, freight_component=0.6, defect_component=0.4,
-        duration_days=None, base_label="HIGH", final_label="HIGH",
-        escalated=False, rationale="test", critical_flag=False,
+        duration_days=None, base_label=risk_label, final_label=risk_label,
+        escalated=False, rationale="test", critical_flag=critical_flag,
     )
-    state = GlobalState(
-        event_metadata=__import__("src.agents.state", fromlist=["EventMetadata"]).EventMetadata(
+    from src.agents.state import EventMetadata
+
+    return GlobalState(
+        event_metadata=EventMetadata(
             disruption_type="port closure", affected_port="Rotterdam", affected_route="test",
             severity=0.6, shock_duration_days=0, recovery_window_days=60, synthetic_ratio=0.0,
         ),
         active_record={"event_date": "2024-01-01", "port": "Rotterdam", "sku": "CHIP_AP"},
         risk_classification=risk,
     )
-    with patch("src.agents.mitigation_agent.insert_mitigation_action"):
-        result = mitigation_recommendation_agent(state)
+
+
+def test_mitigation_agent_rule_based():
+    """Mitigation agent produces rule-based actions when no API key is set."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state()
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=False):
+        with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+            result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
+    assert result["mitigation_llm"] is None
     assert "HIGH" in action.summary
     assert len(action.recommendations) == 3
     assert "stockout" in action.recommendations[0].lower()
+    assert action.rag_citations == []
+    assert action.india_sourcing_recommendations == []
+    # Same vocabulary/format the LLM path uses — never the old CRITICAL/MODERATE strings.
+    assert action.urgency == "HIGH"
+    assert action.cost_delta.startswith("MEDIUM:")
+
+
+def test_mitigation_agent_rule_based_urgency_matches_llm_vocabulary():
+    """Rule-based urgency must use the same IMMEDIATE/HIGH/MEDIUM/LOW scale as the LLM path,
+    computed by the same shared function, for every risk label."""
+    from src.agents.mitigation_agent import _min_required_urgency, _rule_based_action
+
+    for risk_label, expected in [
+        ("CRITICAL", "IMMEDIATE"),
+        ("HIGH", "HIGH"),
+        ("MEDIUM", "MEDIUM"),
+        ("LOW", "LOW"),
+    ]:
+        state = _mitigation_state(risk_label=risk_label)
+        assert _min_required_urgency(state) == expected
+        action = _rule_based_action(state, state.active_record)
+        assert action.urgency == expected
+        level = action.cost_delta.split(":", 1)[0]
+        assert level in ("HIGH", "MEDIUM", "LOW")
+
+
+_FAKE_RAG_CONTEXT = (
+    "### Historical Precedents & Mitigation (1 chunks after reranking)\n\n"
+    "  [1] Collection: historical_precedents | File: red_sea_disruption_2023_2024.txt | distance: 0.300\n"
+    "       Houthi attacks forced Asia-Europe container traffic to reroute.\n\n"
+    "### India Sourcing (ISM/PLI) (1 chunks after reranking)\n\n"
+    "  [1] Collection: india_sourcing_corpus | File: cg_power_kaynes_osat_india.txt | distance: 0.320\n"
+    "       CG Power-Kaynes OSAT joint venture in India."
+)
+
+_EMPTY_RAG_CONTEXT = (
+    "### Historical Precedents & Mitigation (0 chunks after reranking)\n\n"
+    "(Historical Precedents & Mitigation: No relevant chunks retrieved)\n\n"
+    "### India Sourcing (ISM/PLI) (0 chunks after reranking)\n\n"
+    "(India Sourcing (ISM/PLI): No relevant chunks retrieved)"
+)
+
+
+def test_mitigation_agent_llm_success():
+    """Mitigation agent uses GPT-4o + RAG output when the LLM call succeeds."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state(risk_label="CRITICAL", critical_flag=True)
+    mock_output = MitigationLLMOutput(
+        summary="CRITICAL port closure risk requires immediate diversion.",
+        ranked_actions=[
+            "Divert shipments via Cape of Good Hope.",
+            "Raise safety stock on exposed SKUs.",
+            "Activate India OSAT capacity as an alternate.",
+        ],
+        cost_estimate="HIGH: expedited freight required.",
+        urgency="IMMEDIATE",
+        rag_citations=["historical_precedents: red_sea_disruption_2023_2024.txt"],
+        india_sourcing_recommendations=["CG Power-Kaynes OSAT (India) as back-end alternate."],
+    )
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+            with patch("src.agents.mitigation_agent.call_openai_structured", return_value=mock_output):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    state_llm = result["mitigation_llm"]
+    assert state_llm is not None
+    # A sanitized copy, not the raw object — but nothing needed dropping/clamping here,
+    # so field values still match the mocked output.
+    assert state_llm.rag_citations == mock_output.rag_citations
+    assert state_llm.urgency == mock_output.urgency
+    # No clamping occurred (model already said IMMEDIATE) -> cost_estimate must be untouched,
+    # no escalation note appended.
+    assert action.cost_delta == mock_output.cost_estimate
+    assert action.urgency == "IMMEDIATE"
+    assert action.rag_citations == mock_output.rag_citations
+    assert action.india_sourcing_recommendations == mock_output.india_sourcing_recommendations
+    assert action.recommendations == mock_output.ranked_actions
+
+
+def test_mitigation_llm_output_allows_fewer_than_three_actions():
+    """A genuinely low-risk plan may return 1-2 actions instead of being padded to a minimum of 3."""
+    minimal_output = MitigationLLMOutput(
+        summary="Routine monitoring is sufficient.",
+        ranked_actions=["Monitor weekly fill rates for early signs of escalation."],
+        cost_estimate="LOW: no incremental spend required.",
+        urgency="LOW",
+        rag_citations=[],
+        india_sourcing_recommendations=[],
+    )
+    assert len(minimal_output.ranked_actions) == 1
+
+
+def test_mitigation_agent_llm_failure_falls_back():
+    """Mitigation agent falls back to rule-based output when the LLM call raises."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state()
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+            with patch(
+                "src.agents.mitigation_agent.call_openai_structured",
+                side_effect=RuntimeError("rate limit"),
+            ):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    assert result["mitigation_llm"] is None
+    assert len(action.recommendations) == 3
+    assert "stockout" in action.recommendations[0].lower()
+
+
+def test_mitigation_agent_skips_llm_when_no_rag_chunks_retrieved():
+    """No real chunks retrieved anywhere -> must skip the LLM entirely, not force a citation."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state()
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_EMPTY_RAG_CONTEXT):
+            with patch("src.agents.mitigation_agent.call_openai_structured") as mock_call:
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    mock_call.assert_not_called()
+    assert result["mitigation_llm"] is None
+    action = result["mitigation_action"]
+    assert len(action.recommendations) == 3
+    assert "stockout" in action.recommendations[0].lower()
+
+
+def test_mitigation_agent_drops_fabricated_citation():
+    """A citation not present among the retrieved sources must be dropped, not trusted verbatim."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state()
+    fabricated_output = MitigationLLMOutput(
+        summary="test summary",
+        ranked_actions=["Action one.", "Action two.", "Action three."],
+        cost_estimate="LOW: test.",
+        urgency="LOW",
+        rag_citations=["historical_precedents: made_up_source_never_retrieved.txt"],
+        india_sourcing_recommendations=[],
+    )
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+            with patch("src.agents.mitigation_agent.call_openai_structured", return_value=fabricated_output):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    state_llm = result["mitigation_llm"]
+    # Both the action AND the raw state output must be sanitized — a downstream consumer
+    # reading GlobalState.mitigation_llm directly must never see the fabricated citation.
+    assert action.rag_citations == []
+    assert state_llm is not None
+    assert state_llm.rag_citations == []
+
+
+def test_mitigation_agent_clamps_under_escalated_urgency_for_critical_risk():
+    """A CRITICAL risk label must clamp the LLM's urgency up to IMMEDIATE, never trust it verbatim."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+
+    state = _mitigation_state(risk_label="CRITICAL", critical_flag=True)
+    under_escalated_output = MitigationLLMOutput(
+        summary="Understated risk.",
+        ranked_actions=["Monitor conditions.", "Maintain buffers.", "Confirm backup route."],
+        cost_estimate="LOW: no action needed.",
+        urgency="MEDIUM",
+        rag_citations=["historical_precedents: red_sea_disruption_2023_2024.txt"],
+        india_sourcing_recommendations=[],
+    )
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+            with patch(
+                "src.agents.mitigation_agent.call_openai_structured", return_value=under_escalated_output
+            ):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    state_llm = result["mitigation_llm"]
+    assert action.urgency == "IMMEDIATE"
+    # state.mitigation_llm must reflect the clamped value too, not the raw MEDIUM the model returned.
+    assert state_llm is not None
+    assert state_llm.urgency == "IMMEDIATE"
+    # cost_delta must not be left contradicting the enforced urgency (e.g. "LOW: no action needed"
+    # sitting next to urgency=IMMEDIATE) — the escalation must be visible in the text.
+    assert "escalated to IMMEDIATE" in action.cost_delta
+    assert "LOW: no action needed" in action.cost_delta  # original model reasoning preserved
+    assert action.cost_delta == state_llm.cost_estimate
+
+
+def test_mitigation_agent_clamps_under_escalated_urgency_for_tail_risk():
+    """P90 stockout above the tail-risk threshold clamps urgency to IMMEDIATE even for a lower label."""
+    from src.agents.mitigation_agent import mitigation_recommendation_agent
+    from src.agents.state import SimulationResult
+
+    state = _mitigation_state(risk_label="MEDIUM")
+    state = state.model_copy(update={
+        "simulation_result": SimulationResult(
+            stockout_probability_pct=70.0,
+            expected_inventory_gap_pct=50.0,
+            alternate_route="Cape of Good Hope",
+            stockout_probability_p90=75.0,
+        )
+    })
+    under_escalated_output = MitigationLLMOutput(
+        summary="Understated risk.",
+        ranked_actions=["Monitor conditions.", "Maintain buffers.", "Confirm backup route."],
+        cost_estimate="LOW: no action needed.",
+        urgency="LOW",
+        rag_citations=["historical_precedents: red_sea_disruption_2023_2024.txt"],
+        india_sourcing_recommendations=[],
+    )
+    with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
+        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+            with patch(
+                "src.agents.mitigation_agent.call_openai_structured", return_value=under_escalated_output
+            ):
+                with patch("src.agents.mitigation_agent.insert_mitigation_action"):
+                    result = mitigation_recommendation_agent(state)
+    action = result["mitigation_action"]
+    state_llm = result["mitigation_llm"]
+    assert action.urgency == "IMMEDIATE"
+    assert state_llm is not None
+    assert state_llm.urgency == "IMMEDIATE"
 
 
 def test_pydantic_schemas_are_flat():
