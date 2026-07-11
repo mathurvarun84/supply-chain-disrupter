@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional, Set
 
 from src.agents.state import GlobalState, MitigationAction, MitigationLLMOutput
 from src.rag.retriever import build_mitigation_context
@@ -125,13 +126,17 @@ an India facility here would be a fabricated fit, so the list is correctly left 
 
 OUTPUT RULES:
 - ranked_actions: 3-5 specific, procurement-actionable items, most urgent first
-- rag_citations: at least 1 citation naming a source file/collection from the provided RAG context
+- rag_citations: cite ONLY sources that are actually present in the RAG context provided below —
+  never invent a citation. Empty list is acceptable when no retrieved chunk is a genuine fit; any
+  citation naming a source not present in the context is discarded downstream regardless.
 - india_sourcing_recommendations: ONLY include an option when it genuinely matches the affected
   commodity/product category in the RAG context (e.g. a semiconductor, wafer, or component whose
   India/ASEAN corpus entry actually produces or handles that category). Return an EMPTY LIST when
   no real fit exists — do not force a facility or scheme onto an unrelated commodity just because
   India context was retrieved. Never fabricate a company or facility not present in context.
-- All fields required (india_sourcing_recommendations may be an empty list)"""
+- urgency is a recommendation only — the caller enforces a deterministic floor from the risk label
+  and simulation tail risk, so calibrate honestly rather than guessing what will be accepted.
+- All fields required (rag_citations and india_sourcing_recommendations may be empty lists)"""
 
 
 def _build_mitigation_user_message(
@@ -186,13 +191,55 @@ Produce a ranked mitigation plan as a MitigationLLMOutput, grounded in the RAG c
 """
 
 
-def _llm_output_to_action(llm_output: MitigationLLMOutput) -> MitigationAction:
+def _extract_known_sources(rag_context: str) -> Set[str]:
+    """Lowercased filenames actually present in the retrieved RAG context (format_rag_chunks output)."""
+    return {m.lower() for m in re.findall(r"File:\s*(\S+)", rag_context)}
+
+
+def _validate_citations(citations: List[str], known_sources: Set[str]) -> List[str]:
+    """Drop any citation that doesn't reference a source actually retrieved — guards against fabrication."""
+    if not known_sources:
+        return []
+    return [c for c in citations if any(src in c.lower() for src in known_sources)]
+
+
+_URGENCY_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "IMMEDIATE": 3}
+
+
+def _min_required_urgency(state: GlobalState) -> str:
+    """
+    Deterministic urgency floor mirroring _rule_based_action's escalation logic.
+    The LLM's urgency is a recommendation only — it is clamped up to this floor, never trusted
+    verbatim, so a CRITICAL risk label or high tail-risk simulation can't be silently under-escalated.
+    """
+    sim = state.simulation_result
+    stockout_p90 = sim.stockout_probability_p90 if sim else None
+    if state.risk_label == "CRITICAL" or (
+        stockout_p90 is not None and stockout_p90 > TAIL_RISK_P90_THRESHOLD
+    ):
+        return "IMMEDIATE"
+    if state.risk_label == "HIGH":
+        return "HIGH"
+    if state.risk_label == "MEDIUM":
+        return "MEDIUM"
+    return "LOW"
+
+
+def _clamp_urgency(llm_urgency: str, floor: str) -> str:
+    if _URGENCY_RANK.get(llm_urgency, 0) < _URGENCY_RANK[floor]:
+        return floor
+    return llm_urgency
+
+
+def _llm_output_to_action(
+    llm_output: MitigationLLMOutput, rag_citations: List[str], urgency: str
+) -> MitigationAction:
     return MitigationAction(
         summary=llm_output.summary,
         recommendations=llm_output.ranked_actions,
         cost_delta=llm_output.cost_estimate,
-        urgency=llm_output.urgency,
-        rag_citations=llm_output.rag_citations,
+        urgency=urgency,
+        rag_citations=rag_citations,
         india_sourcing_recommendations=llm_output.india_sourcing_recommendations,
     )
 
@@ -288,6 +335,8 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
     llm_output: Optional[MitigationLLMOutput] = None
     action: Optional[MitigationAction] = None
 
+    citations_dropped = 0
+
     if has_openai_api_key() and metadata is not None:
         try:
             export_control_elevated = (
@@ -300,28 +349,40 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
                 risk_label=state.risk_label,
                 export_control_elevated=export_control_elevated,
             )
-            user_msg = _build_mitigation_user_message(
-                disruption_type=metadata.disruption_type,
-                affected_port=metadata.affected_port,
-                affected_route=metadata.affected_route,
-                record=record,
-                risk_label=state.risk_label,
-                composite_score=rc.composite_score if rc else None,
-                forecast_drop_pct=(
-                    state.forecast_result.expected_drop_pct if state.forecast_result else None
-                ),
-                sim_summary=_sim_summary_for_llm(state),
-                rag_context=rag_context,
-            )
-            llm_output = call_openai_structured(
-                system_prompt=MITIGATION_SYSTEM_PROMPT,
-                user_message=user_msg,
-                response_model=MitigationLLMOutput,
-                model=MODEL_REASONING,
-                max_tokens=1024,
-            )
-            action = _llm_output_to_action(llm_output)
-            llm_used = True
+            known_sources = _extract_known_sources(rag_context)
+
+            if not known_sources:
+                # No real chunks retrieved anywhere — calling the LLM would force it to either
+                # fabricate a citation (schema previously required >=1) or produce an ungrounded
+                # plan mislabeled as RAG-grounded. Skip straight to the rule-based path instead.
+                logger.info("L7: no RAG chunks retrieved — skipping LLM, using rule-based fallback.")
+            else:
+                user_msg = _build_mitigation_user_message(
+                    disruption_type=metadata.disruption_type,
+                    affected_port=metadata.affected_port,
+                    affected_route=metadata.affected_route,
+                    record=record,
+                    risk_label=state.risk_label,
+                    composite_score=rc.composite_score if rc else None,
+                    forecast_drop_pct=(
+                        state.forecast_result.expected_drop_pct if state.forecast_result else None
+                    ),
+                    sim_summary=_sim_summary_for_llm(state),
+                    rag_context=rag_context,
+                )
+                llm_output = call_openai_structured(
+                    system_prompt=MITIGATION_SYSTEM_PROMPT,
+                    user_message=user_msg,
+                    response_model=MitigationLLMOutput,
+                    model=MODEL_REASONING,
+                    max_tokens=1024,
+                )
+                validated_citations = _validate_citations(llm_output.rag_citations, known_sources)
+                citations_dropped = len(llm_output.rag_citations) - len(validated_citations)
+                urgency_floor = _min_required_urgency(state)
+                clamped_urgency = _clamp_urgency(llm_output.urgency, urgency_floor)
+                action = _llm_output_to_action(llm_output, validated_citations, clamped_urgency)
+                llm_used = True
         except Exception as exc:
             logger.warning("L7 LLM failed — falling back to rule-based: %s", exc)
 
@@ -347,6 +408,7 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
         "agent_logs": state.agent_logs + [
             f"L7: Mitigation recommendation {'(gpt-4o+RAG)' if llm_used else '(rule-based fallback)'} "
             f"generated and persisted. urgency={action.urgency} "
-            f"citations={len(action.rag_citations)} india_recs={len(action.india_sourcing_recommendations)}"
+            f"citations={len(action.rag_citations)} (dropped={citations_dropped}) "
+            f"india_recs={len(action.india_sourcing_recommendations)}"
         ],
     }

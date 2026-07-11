@@ -196,9 +196,12 @@ class MitigationLLMOutput(BaseModel):
         description="IMMEDIATE=CRITICAL label, HIGH=HIGH label, etc.",
     )
     rag_citations: List[str] = Field(
-        ...,
-        min_length=1,
-        description="At least 1 citation from provided RAG context.",
+        default_factory=list,
+        description=(
+            "Citations naming sources actually present in the provided RAG context. Empty list "
+            "is valid when no retrieved chunk is a genuine fit — never invent a source; fabricated "
+            "citations are filtered out downstream against the real retrieved sources."
+        ),
     )
     india_sourcing_recommendations: List[str] = Field(
         default_factory=list,
