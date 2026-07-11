@@ -22,6 +22,20 @@ class _FakeCompiledGraph:
         yield {"l7_mitigation": {"agent_logs": ["L1: ok", "L2: ok", "L7: ok"]}}
 
 
+def test_run_with_trulens_ensures_schema_before_running():
+    # llm_call_log/agent_execution_log must exist before the graph runs, or
+    # call_openai_structured's own record_llm_generation() write fails
+    # silently and openai_patch.py's token read-back always returns None.
+    with patch(
+        "src.evaluation.trulens_integration.wrapper.build_agent_graph",
+        return_value=_FakeCompiledGraph(),
+    ):
+        with patch("src.utils.db_utils.ensure_schema") as mock_ensure_schema:
+            run_with_trulens({"sku": "CHIP_AP", "event_date": "2024-04-03"})
+
+    mock_ensure_schema.assert_called_once()
+
+
 def test_run_with_trulens_returns_merged_final_state():
     with patch(
         "src.evaluation.trulens_integration.wrapper.build_agent_graph",

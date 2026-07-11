@@ -63,6 +63,17 @@ def _record_pipeline_run(
 
 def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
     """Drop-in replacement for run_agent_graph(payload) with TruLens tracing."""
+    from src.utils.db_utils import ensure_schema
+
+    # Neither run_agent_graph() nor build_agent_graph() calls ensure_schema()
+    # — on a freshly-built outputs/supply_chain.db (rebuilt via
+    # src.build_databases, which only creates the workbook-sourced tables),
+    # llm_call_log/agent_execution_log don't exist yet, so
+    # call_openai_structured's own record_llm_generation() write fails
+    # silently and openai_patch.py's SQLite read-back always returns None.
+    # Discovered during Task 13 manual verification.
+    ensure_schema()
+
     run_id = payload.get("run_id") or str(uuid.uuid4())
     app = build_agent_graph(payload)
 
