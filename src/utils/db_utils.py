@@ -206,6 +206,20 @@ def fetch_latest_llm_call_log(run_id: str, agent_name: str) -> Optional[Dict[str
     return dict(rows[0]) if rows else None
 
 
+def fetch_recent_composite_scores(days: int) -> List[float]:
+    """Return composite_score values from risk_classifications in the last `days` days."""
+    ensure_schema()
+    rows = execute_query(
+        """
+        SELECT composite_score FROM risk_classifications
+        WHERE run_ts >= datetime('now', ?)
+        ORDER BY run_ts DESC
+        """,
+        (f"-{int(days)} days",),
+    )
+    return [row["composite_score"] for row in rows]
+
+
 def fetch_recent_news(
     region: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:
