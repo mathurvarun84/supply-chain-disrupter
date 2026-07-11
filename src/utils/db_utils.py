@@ -191,6 +191,21 @@ def fetch_latest_weather_signal(hub: str) -> Optional[Dict[str, Any]]:
     return dict(rows[0]) if rows else None
 
 
+def fetch_latest_llm_call_log(run_id: str, agent_name: str) -> Optional[Dict[str, Any]]:
+    """Return the most recent llm_call_log row for (run_id, agent_name), or None."""
+    ensure_schema()
+    rows = execute_query(
+        """
+        SELECT * FROM llm_call_log
+        WHERE run_id = ? AND agent_name = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, agent_name),
+    )
+    return dict(rows[0]) if rows else None
+
+
 def fetch_recent_news(
     region: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:
