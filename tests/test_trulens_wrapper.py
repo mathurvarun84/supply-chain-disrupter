@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.agents.state import GlobalState
-from src.evaluation.trulens_integration.wrapper import run_with_trulens
+from src.evaluation.trulens_integration.wrapper import _pipeline_body, run_with_trulens
 
 
 class _FakeCompiledGraph:
@@ -83,19 +83,20 @@ def test_run_with_trulens_uses_run_id_from_payload_when_present():
     assert graph.captured["run_id"] == "fixed-id-123"
 
 
-def test_run_with_trulens_records_per_node_latency():
+def test_pipeline_body_labels_per_node_latency():
+    # _pipeline_body is the pure core logic (no TruLens dependency) —
+    # unit-tested directly rather than through the real TruApp recording
+    # path that run_with_trulens() now wraps it in.
     with patch(
         "src.evaluation.trulens_integration.wrapper.build_agent_graph",
         return_value=_FakeCompiledGraph(),
     ):
-        with patch(
-            "src.evaluation.trulens_integration.wrapper._record_pipeline_run"
-        ) as mock_record:
-            run_with_trulens({"sku": "CHIP_AP", "event_date": "2024-04-03"})
+        state, latencies, llm_calls = _pipeline_body(
+            {"sku": "CHIP_AP", "event_date": "2024-04-03"}, run_id="test-run-id"
+        )
 
-    assert mock_record.called
-    _, kwargs = mock_record.call_args
-    latencies = kwargs["node_latencies_ms"]
+    assert isinstance(state, GlobalState)
+    assert llm_calls == []
     # wrapper.py relabels raw node names (l1_data_ingestion, ...) via
     # NODE_LATENCY_LABELS to the short form node_latency_check() expects
     # (L1, L2, ...), and adds a "total" entry summing all node latencies.
@@ -104,6 +105,32 @@ def test_run_with_trulens_records_per_node_latency():
     assert latencies["total"] == pytest.approx(
         latencies["L1"] + latencies["L2"] + latencies["L7"]
     )
+
+
+def test_run_with_trulens_records_a_real_trulens_event():
+    # Unlike the other tests here, this deliberately does NOT mock TruLens —
+    # it's the one test proving run_with_trulens() actually writes something
+    # TruLens's own dashboard can read, not just that our own telemetry
+    # capture (_pipeline_body) runs correctly.
+    import sqlite3
+
+    from src.evaluation.trulens_integration.config import DB_PATH, get_session
+
+    with patch(
+        "src.evaluation.trulens_integration.wrapper.build_agent_graph",
+        return_value=_FakeCompiledGraph(),
+    ):
+        run_with_trulens({"sku": "CHIP_AP", "event_date": "2024-04-03", "run_id": "trulens-event-test"})
+
+    get_session().force_flush()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM trulens_events WHERE record_attributes LIKE '%supply_chain_pipeline%'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count > 0
 
 
 def test_run_with_trulens_lets_node_exceptions_propagate():

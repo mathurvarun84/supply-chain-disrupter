@@ -16,6 +16,15 @@ production graph runs have run_id=None throughout and their llm_call_log
 rows are unattributable. This wrapper mints (or reuses payload["run_id"])
 and seeds GlobalState(run_id=...) so the OpenAI patch's SQLite lookups in
 openai_patch.py work correctly.
+
+Recording into TruLens's own dashboard uses TruApp + @instrument (the
+current, OTEL-native API — verified against the installed trulens-core
+2.8.1: the legacy TruVirtual.add_record() path raises "Not supported with
+OTel tracing enabled!" since OTEL tracing is this version's default).
+_PipelineRunner.run() is the @instrument-decorated span; wrapping it in
+`with tru_app as recording:` still lets real exceptions propagate
+unchanged (verified directly against the installed package) — only
+session.force_flush() afterward is best-effort/non-blocking.
 """
 
 from __future__ import annotations
@@ -24,6 +33,8 @@ import logging
 import time
 import uuid
 from typing import Any, Dict
+
+from trulens.apps.app import TruApp, instrument
 
 from src.agents.langgraph_engine import build_agent_graph
 from src.agents.state import GlobalState
@@ -35,46 +46,13 @@ from src.evaluation.trulens_integration.openai_patch import LLMCallRecord, patch
 logger = logging.getLogger(__name__)
 
 
-def _record_pipeline_run(
-    *,
-    run_id: str,
-    node_latencies_ms: Dict[str, float],
-    llm_calls: list[LLMCallRecord],
-    l4_signals: Dict[str, Any] | None,
-    l5_forecast: Dict[str, Any] | None,
-) -> None:
-    """Best-effort: write this run's telemetry into the TruLens session.
+def _pipeline_body(payload: Dict[str, Any], run_id: str) -> tuple[GlobalState, Dict[str, float], list]:
+    """Core pipeline execution: stream the graph, patch OpenAI calls, merge state.
 
-    Isolated from the streaming/merge loop in run_with_trulens() so a
-    TruLens-side failure here can never affect the returned GlobalState.
+    Pure with respect to TruLens — no session/recording concerns here, so
+    this is testable without a real TruLens session. Returns
+    (final_state, labeled_node_latencies_ms, llm_call_records).
     """
-    try:
-        from src.evaluation.trulens_integration.config import get_session
-
-        get_session()
-        logger.info(
-            "TruLens run recorded run_id=%s node_latencies_ms=%s llm_call_count=%d "
-            "l4_signals=%s l5_forecast=%s",
-            run_id, node_latencies_ms, len(llm_calls), l4_signals, l5_forecast,
-        )
-    except Exception as exc:
-        logger.warning("TruLens record write failed (non-blocking) for run_id=%s: %s", run_id, exc)
-
-
-def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
-    """Drop-in replacement for run_agent_graph(payload) with TruLens tracing."""
-    from src.utils.db_utils import ensure_schema
-
-    # Neither run_agent_graph() nor build_agent_graph() calls ensure_schema()
-    # — on a freshly-built outputs/supply_chain.db (rebuilt via
-    # src.build_databases, which only creates the workbook-sourced tables),
-    # llm_call_log/agent_execution_log don't exist yet, so
-    # call_openai_structured's own record_llm_generation() write fails
-    # silently and openai_patch.py's SQLite read-back always returns None.
-    # Discovered during Task 13 manual verification.
-    ensure_schema()
-
-    run_id = payload.get("run_id") or str(uuid.uuid4())
     app = build_agent_graph(payload)
 
     node_latencies_ms: Dict[str, float] = {}
@@ -98,12 +76,61 @@ def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
     }
     labeled_latencies["total"] = sum(node_latencies_ms.values())
 
-    _record_pipeline_run(
-        run_id=run_id,
-        node_latencies_ms=labeled_latencies,
-        llm_calls=llm_calls,
-        l4_signals=extract_l4_signals(state),
-        l5_forecast=extract_l5_forecast(state),
-    )
+    return state, labeled_latencies, llm_calls
 
-    return state
+
+class _PipelineRunner:
+    """Holds one run's result so the @instrument-decorated span has a plain
+    method to wrap; TruApp records args/return value of `run()` as the span's
+    root input/output automatically."""
+
+    def __init__(self) -> None:
+        self.final_state: GlobalState | None = None
+        self.node_latencies_ms: Dict[str, float] = {}
+        self.llm_calls: list[LLMCallRecord] = []
+
+    @instrument
+    def run(self, payload: Dict[str, Any], run_id: str) -> Dict[str, Any]:
+        state, node_latencies_ms, llm_calls = _pipeline_body(payload, run_id)
+        self.final_state = state
+        self.node_latencies_ms = node_latencies_ms
+        self.llm_calls = llm_calls
+        return {
+            "risk_label": state.risk_label,
+            "composite_score": state.risk_score_composite,
+            "node_latencies_ms": node_latencies_ms,
+            "llm_call_count": len(llm_calls),
+            "l4_signals": extract_l4_signals(state),
+            "l5_forecast": extract_l5_forecast(state),
+        }
+
+
+def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
+    """Drop-in replacement for run_agent_graph(payload) with TruLens tracing."""
+    from src.utils.db_utils import ensure_schema
+
+    # Neither run_agent_graph() nor build_agent_graph() calls ensure_schema()
+    # — on a freshly-built outputs/supply_chain.db (rebuilt via
+    # src.build_databases, which only creates the workbook-sourced tables),
+    # llm_call_log/agent_execution_log don't exist yet, so
+    # call_openai_structured's own record_llm_generation() write fails
+    # silently and openai_patch.py's SQLite read-back always returns None.
+    # Discovered during Task 13 manual verification.
+    ensure_schema()
+
+    run_id = payload.get("run_id") or str(uuid.uuid4())
+    runner = _PipelineRunner()
+    tru_app = TruApp(runner, app_name="supply_chain_pipeline", app_version="v1", main_method=runner.run)
+
+    with tru_app as recording:
+        runner.run(payload, run_id)
+
+    try:
+        from src.evaluation.trulens_integration.config import get_session
+
+        get_session().force_flush()
+    except Exception as exc:
+        logger.warning("TruLens flush failed (non-blocking) for run_id=%s: %s", run_id, exc)
+
+    assert runner.final_state is not None
+    return runner.final_state
