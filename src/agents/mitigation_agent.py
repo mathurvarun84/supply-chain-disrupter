@@ -231,16 +231,31 @@ def _clamp_urgency(llm_urgency: str, floor: str) -> str:
     return llm_urgency
 
 
-def _llm_output_to_action(
-    llm_output: MitigationLLMOutput, rag_citations: List[str], urgency: str
-) -> MitigationAction:
+def _llm_output_to_action(llm_output: MitigationLLMOutput) -> MitigationAction:
+    """Build the action from an already-sanitized llm_output (see _sanitize_llm_output)."""
     return MitigationAction(
         summary=llm_output.summary,
         recommendations=llm_output.ranked_actions,
         cost_delta=llm_output.cost_estimate,
-        urgency=urgency,
-        rag_citations=rag_citations,
+        urgency=llm_output.urgency,
+        rag_citations=llm_output.rag_citations,
         india_sourcing_recommendations=llm_output.india_sourcing_recommendations,
+    )
+
+
+def _sanitize_llm_output(
+    llm_output: MitigationLLMOutput, known_sources: Set[str], state: GlobalState
+) -> MitigationLLMOutput:
+    """
+    Return a corrected copy of llm_output with fabricated citations dropped and urgency
+    clamped to the deterministic floor. This sanitized copy — never the raw parsed
+    response — is what becomes both mitigation_action and state.mitigation_llm, so the
+    two can never disagree about what was actually grounded/escalated.
+    """
+    validated_citations = _validate_citations(llm_output.rag_citations, known_sources)
+    clamped_urgency = _clamp_urgency(llm_output.urgency, _min_required_urgency(state))
+    return llm_output.model_copy(
+        update={"rag_citations": validated_citations, "urgency": clamped_urgency}
     )
 
 
@@ -370,18 +385,21 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
                     sim_summary=_sim_summary_for_llm(state),
                     rag_context=rag_context,
                 )
-                llm_output = call_openai_structured(
+                raw_llm_output = call_openai_structured(
                     system_prompt=MITIGATION_SYSTEM_PROMPT,
                     user_message=user_msg,
                     response_model=MitigationLLMOutput,
                     model=MODEL_REASONING,
                     max_tokens=1024,
                 )
-                validated_citations = _validate_citations(llm_output.rag_citations, known_sources)
-                citations_dropped = len(llm_output.rag_citations) - len(validated_citations)
-                urgency_floor = _min_required_urgency(state)
-                clamped_urgency = _clamp_urgency(llm_output.urgency, urgency_floor)
-                action = _llm_output_to_action(llm_output, validated_citations, clamped_urgency)
+                citations_dropped = len(raw_llm_output.rag_citations) - len(
+                    _validate_citations(raw_llm_output.rag_citations, known_sources)
+                )
+                # Sanitize once — this corrected copy is what becomes BOTH mitigation_action
+                # and state.mitigation_llm, so the two can never disagree about what was
+                # actually grounded or escalated (see review on the earlier revision).
+                llm_output = _sanitize_llm_output(raw_llm_output, known_sources, state)
+                action = _llm_output_to_action(llm_output)
                 llm_used = True
         except Exception as exc:
             logger.warning("L7 LLM failed — falling back to rule-based: %s", exc)

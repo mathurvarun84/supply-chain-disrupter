@@ -271,7 +271,12 @@ def test_mitigation_agent_llm_success():
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
-    assert result["mitigation_llm"] is mock_output
+    state_llm = result["mitigation_llm"]
+    assert state_llm is not None
+    # A sanitized copy, not the raw object — but nothing needed dropping/clamping here,
+    # so field values still match the mocked output.
+    assert state_llm.rag_citations == mock_output.rag_citations
+    assert state_llm.urgency == mock_output.urgency
     assert action.urgency == "IMMEDIATE"
     assert action.rag_citations == mock_output.rag_citations
     assert action.india_sourcing_recommendations == mock_output.india_sourcing_recommendations
@@ -333,8 +338,12 @@ def test_mitigation_agent_drops_fabricated_citation():
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
-    assert result["mitigation_llm"] is fabricated_output
+    state_llm = result["mitigation_llm"]
+    # Both the action AND the raw state output must be sanitized — a downstream consumer
+    # reading GlobalState.mitigation_llm directly must never see the fabricated citation.
     assert action.rag_citations == []
+    assert state_llm is not None
+    assert state_llm.rag_citations == []
 
 
 def test_mitigation_agent_clamps_under_escalated_urgency_for_critical_risk():
@@ -358,7 +367,11 @@ def test_mitigation_agent_clamps_under_escalated_urgency_for_critical_risk():
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
+    state_llm = result["mitigation_llm"]
     assert action.urgency == "IMMEDIATE"
+    # state.mitigation_llm must reflect the clamped value too, not the raw MEDIUM the model returned.
+    assert state_llm is not None
+    assert state_llm.urgency == "IMMEDIATE"
 
 
 def test_mitigation_agent_clamps_under_escalated_urgency_for_tail_risk():
@@ -391,7 +404,10 @@ def test_mitigation_agent_clamps_under_escalated_urgency_for_tail_risk():
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
     action = result["mitigation_action"]
+    state_llm = result["mitigation_llm"]
     assert action.urgency == "IMMEDIATE"
+    assert state_llm is not None
+    assert state_llm.urgency == "IMMEDIATE"
 
 
 def test_pydantic_schemas_are_flat():
