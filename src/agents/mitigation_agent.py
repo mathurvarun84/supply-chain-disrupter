@@ -254,9 +254,18 @@ def _sanitize_llm_output(
     """
     validated_citations = _validate_citations(llm_output.rag_citations, known_sources)
     clamped_urgency = _clamp_urgency(llm_output.urgency, _min_required_urgency(state))
-    return llm_output.model_copy(
-        update={"rag_citations": validated_citations, "urgency": clamped_urgency}
-    )
+
+    updates: Dict[str, Any] = {"rag_citations": validated_citations, "urgency": clamped_urgency}
+    if clamped_urgency != llm_output.urgency:
+        # Clamping alone would leave cost_estimate contradicting the enforced urgency
+        # (e.g. urgency=IMMEDIATE next to "LOW: no action needed") — make the override visible
+        # instead of silently rewriting the model's own cost reasoning.
+        updates["cost_estimate"] = (
+            f"{llm_output.cost_estimate} "
+            f"[Urgency escalated to {clamped_urgency} by deterministic floor — "
+            f"model estimated {llm_output.urgency}.]"
+        )
+    return llm_output.model_copy(update=updates)
 
 
 def _rule_based_action(state: GlobalState, record: dict) -> MitigationAction:

@@ -277,6 +277,9 @@ def test_mitigation_agent_llm_success():
     # so field values still match the mocked output.
     assert state_llm.rag_citations == mock_output.rag_citations
     assert state_llm.urgency == mock_output.urgency
+    # No clamping occurred (model already said IMMEDIATE) -> cost_estimate must be untouched,
+    # no escalation note appended.
+    assert action.cost_delta == mock_output.cost_estimate
     assert action.urgency == "IMMEDIATE"
     assert action.rag_citations == mock_output.rag_citations
     assert action.india_sourcing_recommendations == mock_output.india_sourcing_recommendations
@@ -372,6 +375,11 @@ def test_mitigation_agent_clamps_under_escalated_urgency_for_critical_risk():
     # state.mitigation_llm must reflect the clamped value too, not the raw MEDIUM the model returned.
     assert state_llm is not None
     assert state_llm.urgency == "IMMEDIATE"
+    # cost_delta must not be left contradicting the enforced urgency (e.g. "LOW: no action needed"
+    # sitting next to urgency=IMMEDIATE) — the escalation must be visible in the text.
+    assert "escalated to IMMEDIATE" in action.cost_delta
+    assert "LOW: no action needed" in action.cost_delta  # original model reasoning preserved
+    assert action.cost_delta == state_llm.cost_estimate
 
 
 def test_mitigation_agent_clamps_under_escalated_urgency_for_tail_risk():
