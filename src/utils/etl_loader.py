@@ -26,6 +26,9 @@ SPEC_NORM_BOUNDS: Dict[str, tuple[float, float]] = {
     "disruption_news_count":   (0.0,  22.0),
 }
 
+# Core sheets that must be present in every supported workbook version.
+REQUIRED_SHEETS = {"Lite Master", "Ops KPI (Filled)"}
+# Full set expected by the original workbook (v3.1). Absent in the slim v4 workbook.
 EXPECTED_SHEETS = {
     "Lite Master",
     "Column Guide (Lite)",
@@ -70,27 +73,29 @@ def read_excel_sheets(excel_path: Path = EXCEL_SOURCE) -> Dict[str, pd.DataFrame
         raise FileNotFoundError(f"Excel file not found: {excel_path}")
 
     workbook = pd.ExcelFile(excel_path)
-    missing = EXPECTED_SHEETS.difference(workbook.sheet_names)
-    if missing:
-        raise ValueError(f"Missing expected workbook sheets: {sorted(missing)}")
+    available = set(workbook.sheet_names)
+    # Only the two core sheets are required; others are optional (absent in slim v4 workbook).
+    missing_core = REQUIRED_SHEETS.difference(available)
+    if missing_core:
+        raise ValueError(f"Missing required workbook sheets: {sorted(missing_core)}")
 
     sheets = {
         "Lite Master": pd.read_excel(excel_path, sheet_name="Lite Master", header=1),
-        "Column Guide (Lite)": pd.read_excel(
-            excel_path, sheet_name="Column Guide (Lite)", header=2
-        ),
-        "Legend": pd.read_excel(excel_path, sheet_name="Legend", header=None),
         "Ops KPI (Filled)": pd.read_excel(
             excel_path, sheet_name="Ops KPI (Filled)", header=1
         ),
-        "Semiconductor Signals": pd.read_excel(
-            excel_path, sheet_name="Semiconductor Signals", header=1
-        ),
     }
-
-    # SKU_Product_Mapping is NOT in EXPECTED_SHEETS -- older workbooks that
-    # predate the sku_id crosswalk work must still load without it.
-    if "SKU_Product_Mapping" in workbook.sheet_names:
+    if "Column Guide (Lite)" in available:
+        sheets["Column Guide (Lite)"] = pd.read_excel(
+            excel_path, sheet_name="Column Guide (Lite)", header=2
+        )
+    if "Legend" in available:
+        sheets["Legend"] = pd.read_excel(excel_path, sheet_name="Legend", header=None)
+    if "Semiconductor Signals" in available:
+        sheets["Semiconductor Signals"] = pd.read_excel(
+            excel_path, sheet_name="Semiconductor Signals", header=1
+        )
+    if "SKU_Product_Mapping" in available:
         sheets["SKU_Product_Mapping"] = pd.read_excel(
             excel_path, sheet_name="SKU_Product_Mapping", header=1
         )
@@ -259,7 +264,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             cost_saving_usd REAL,
             disruption_event_label TEXT,
             agent_triggered TEXT,
-            intervention_date TEXT
+            intervention_date TEXT,
+            mapped_product_name TEXT
         );
 
         CREATE TABLE semiconductor_signals (
@@ -444,63 +450,74 @@ def load_excel_into_sqlite(
         )
 
         ops = sheets["Ops KPI (Filled)"].dropna(how="all")
-        ops_columns = list(ops.columns)
-        _insert_frame(
-            conn,
-            "ops_kpi",
-            ops,
-            ops_columns,
-            [
-                "week_start", "sku_id", "region", "supplier_region", "price_usd",
-                "promo_flag", "weather_index", "disruption_flag", "stockout_flag",
-                "demand_actual", "forecast_baseline", "forecast_ai",
-                "mape_baseline", "mape_ai", "mape_improvement_pct",
-                "lead_time_baseline_days", "lead_time_after_days",
-                "lead_time_saved_days", "otr_baseline", "otr_after",
-                "cost_baseline_usd", "cost_after_usd", "cost_saving_usd",
-                "disruption_event_label", "agent_triggered", "intervention_date",
-            ],
-        )
+        # Explicit source columns — avoids breakage when the Excel adds new columns
+        # Explicit source columns — avoids breakage if the Excel gains new columns.
+        _OPS_SOURCE = [
+            "Week_Start", "SKU_ID", "Region", "Supplier_Region", "Price_USD",
+            "Promo_Flag", "Weather_Index", "Disruption_Flag", "Stockout_Flag",
+            "Demand_Actual", "Forecast_Baseline", "Forecast_AI",
+            "MAPE_Baseline", "MAPE_AI", "MAPE_Improvement_Pct",
+            "Lead_Time_Baseline_Days", "Lead_Time_After_Days",
+            "Lead_Time_Saved_Days", "OTR_Baseline", "OTR_After",
+            "Cost_Baseline_USD", "Cost_After_USD", "Cost_Saving_USD",
+            "Disruption_Event_Label", "Agent_Triggered", "Intervention_Date",
+        ]
+        _OPS_TARGET = [
+            "week_start", "sku_id", "region", "supplier_region", "price_usd",
+            "promo_flag", "weather_index", "disruption_flag", "stockout_flag",
+            "demand_actual", "forecast_baseline", "forecast_ai",
+            "mape_baseline", "mape_ai", "mape_improvement_pct",
+            "lead_time_baseline_days", "lead_time_after_days",
+            "lead_time_saved_days", "otr_baseline", "otr_after",
+            "cost_baseline_usd", "cost_after_usd", "cost_saving_usd",
+            "disruption_event_label", "agent_triggered", "intervention_date",
+        ]
+        _insert_frame(conn, "ops_kpi", ops, _OPS_SOURCE, _OPS_TARGET)
 
-        signals = sheets["Semiconductor Signals"].dropna(how="all")
-        signal_columns = list(signals.columns)
-        _insert_frame(
-            conn,
-            "semiconductor_signals",
-            signals,
-            signal_columns,
-            [
-                "year", "country", "company", "production_capacity_wafers",
-                "fab_count", "technology_node_nm", "ai_chip_production",
-                "foundry_revenue_usd", "global_market_share",
-                "export_control_level", "sanctions_index", "trade_tension_level",
-                "semiconductor_security_risk", "cn_export_control",
-                "cn_security_risk", "natural_disaster_risk",
-                "factory_shutdown_risk", "supply_disruption_index",
-                "global_semiconductor_revenue", "ai_chip_revenue",
-                "chip_price_index", "market_growth_rate",
-                "known_disruption_event", "known_severity",
-            ],
-        )
+        if "Semiconductor Signals" in sheets:
+            signals = sheets["Semiconductor Signals"].dropna(how="all")
+            signal_columns = list(signals.columns)
+            _insert_frame(
+                conn,
+                "semiconductor_signals",
+                signals,
+                signal_columns,
+                [
+                    "year", "country", "company", "production_capacity_wafers",
+                    "fab_count", "technology_node_nm", "ai_chip_production",
+                    "foundry_revenue_usd", "global_market_share",
+                    "export_control_level", "sanctions_index", "trade_tension_level",
+                    "semiconductor_security_risk", "cn_export_control",
+                    "cn_security_risk", "natural_disaster_risk",
+                    "factory_shutdown_risk", "supply_disruption_index",
+                    "global_semiconductor_revenue", "ai_chip_revenue",
+                    "chip_price_index", "market_growth_rate",
+                    "known_disruption_event", "known_severity",
+                ],
+            )
+        else:
+            signals = None  # used in metadata below
 
-        guide = sheets["Column Guide (Lite)"].dropna(how="all")
-        _insert_frame(
-            conn,
-            "column_guide",
-            guide,
-            ["Agent", "Column", "Source Type", "Purpose"],
-            ["agent", "column_name", "source_type", "purpose"],
-        )
+        if "Column Guide (Lite)" in sheets:
+            guide = sheets["Column Guide (Lite)"].dropna(how="all")
+            _insert_frame(
+                conn,
+                "column_guide",
+                guide,
+                ["Agent", "Column", "Source Type", "Purpose"],
+                ["agent", "column_name", "source_type", "purpose"],
+            )
 
-        legend = sheets["Legend"].dropna(how="all")
-        legend.columns = ["item", "description"]
-        _insert_frame(
-            conn,
-            "workbook_legend",
-            legend,
-            ["item", "description"],
-            ["item", "description"],
-        )
+        if "Legend" in sheets:
+            legend = sheets["Legend"].dropna(how="all")
+            legend.columns = ["item", "description"]
+            _insert_frame(
+                conn,
+                "workbook_legend",
+                legend,
+                ["item", "description"],
+                ["item", "description"],
+            )
 
         # Audit copy of the SKU_Product_Mapping crosswalk sheet, only when
         # the source workbook carries it (older workbooks are unaffected).
@@ -532,7 +549,7 @@ def load_excel_into_sqlite(
             "built_at_utc": datetime.now(timezone.utc).isoformat(),
             "lite_master_rows": str(len(sheets["Lite Master"])),
             "ops_kpi_rows": str(len(ops)),
-            "semiconductor_signal_rows": str(len(signals)),
+            "semiconductor_signal_rows": str(len(signals)) if signals is not None else "0",
         }
         conn.executemany(
             "INSERT INTO ingestion_metadata(key, value) VALUES (?, ?)",
@@ -544,7 +561,7 @@ def load_excel_into_sqlite(
         if integrity != "ok":
             raise RuntimeError(f"SQLite integrity check failed: {integrity}")
 
-        # Step 6 — update column_guide to reflect the correct 4-tier label set
+        # Update column_guide label descriptions if the table was populated
         conn.execute(
             """
             UPDATE column_guide

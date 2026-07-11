@@ -187,6 +187,7 @@ def ensure_schema() -> None:
             """
         )
     ensure_simulation_schema()
+    ensure_forecast_schema()
 
 
 def ensure_sku_id_columns() -> None:
@@ -1396,6 +1397,46 @@ def fetch_guardrail_events() -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+# ---------------------------------------------------------------------------
+# L5 Demand Forecast schema + persistence helpers
+# ---------------------------------------------------------------------------
+
+def ensure_forecast_schema() -> None:
+    """Create the demand_forecasts table used by DemandForecastingAgent v3."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS demand_forecasts (
+                sku_id          TEXT NOT NULL,
+                week_start      TEXT NOT NULL,
+                demand_baseline REAL,
+                demand_disrupted REAL,
+                deviation_pct   REAL,
+                stockout_prob   REAL,
+                mape_prophet    REAL,
+                generated_at_utc TEXT,
+                PRIMARY KEY (sku_id, week_start)
+            )
+            """
+        )
+
+
+def fetch_forecast_for_sku(sku_id: str) -> List[Dict[str, Any]]:
+    """Return all stored forecast weeks for one SKU, ordered chronologically."""
+    ensure_forecast_schema()
+    rows = execute_query(
+        """
+        SELECT sku_id, week_start, demand_baseline, demand_disrupted,
+               deviation_pct, stockout_prob, mape_prophet, generated_at_utc
+        FROM demand_forecasts
+        WHERE sku_id = ?
+        ORDER BY week_start ASC
+        """,
+        (sku_id,),
+    )
+    return [dict(row) for row in rows]
+
+
 def build_stockout_histogram(stockout_pcts: List[float]) -> List[Dict[str, Any]]:
     """Bucket stockout probability samples into 10% histogram bins for simulation_output."""
     bins = [
@@ -1407,3 +1448,12 @@ def build_stockout_histogram(stockout_pcts: List[float]) -> List[Dict[str, Any]]
         idx = min(int(max(pct, 0.0) / 10.0), len(bins) - 1)
         counts[idx] += 1
     return [{"range": label, "count": count} for label, count in zip(bins, counts)]
+
+
+def list_forecast_skus() -> List[str]:
+    """Return all SKU IDs that have at least one persisted forecast week."""
+    ensure_forecast_schema()
+    rows = execute_query(
+        "SELECT DISTINCT sku_id FROM demand_forecasts ORDER BY sku_id"
+    )
+    return [row["sku_id"] for row in rows]

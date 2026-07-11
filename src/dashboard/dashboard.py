@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import streamlit as st
 
 from src.agents.langgraph_engine import run_agent_graph
@@ -8,6 +11,8 @@ from src.utils.db_utils import ensure_schema, fetch_scenario_options
 from src.utils.ingestion_schema import ensure_ingestion_schema
 from src.utils.openai_utils import has_openai_api_key
 from src.rag.utils import query_chroma_rag
+
+_FORECAST_OUTPUTS_DIR = Path(__file__).parents[2] / "data" / "forecast_outputs"
 
 
 def _render_impact_simulation(result) -> None:
@@ -57,6 +62,189 @@ def _render_impact_simulation(result) -> None:
                 plt.close(fig)
         except ImportError:
             pass
+
+
+def _render_demand_forecast(forecast_result) -> None:
+    """Render the full L5 DemandForecastingAgent v4 output block."""
+    if forecast_result is None:
+        return
+
+    fc = forecast_result
+    # v4 uses demand_forecast; v3 used prophet_forecast — support both
+    weeks = (
+        fc.demand_forecast if (hasattr(fc, "demand_forecast") and fc.demand_forecast)
+        else getattr(fc, "prophet_forecast", [])
+    )
+    model_label = getattr(fc, "model_selected", "prophet")
+
+    st.subheader(f"L5 — Demand Forecast (5-Week · model: {model_label})")
+
+    # ── Top metrics row ───────────────────────────────────────────────────────
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Expected Demand Drop", f"{fc.expected_drop_pct:.1f}%")
+    if fc.stockout_prob is not None:
+        m2.metric("Stockout Probability (L5)", f"{fc.stockout_prob:.1%}")
+    if fc.mape_prophet_selected is not None:
+        m3.metric("MAPE (selected model)", f"{fc.mape_prophet_selected:.1f}%")
+    if fc.mape_improvement_pct_vs_dataset_baseline is not None:
+        m4.metric(
+            "MAPE improvement vs baseline",
+            f"{fc.mape_improvement_pct_vs_dataset_baseline:.1f}%",
+        )
+
+    # ── Regressor selection ───────────────────────────────────────────────────
+    regs = fc.regressors_used or []
+    st.caption(
+        f"Regressors selected (backtest ablation): "
+        + (", ".join(f"`{r}`" for r in regs) if regs else "`trend-only`")
+    )
+
+    # ── 5-week forecast chart ─────────────────────────────────────────────────
+    if weeks:
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mticker
+
+            labels = [w["week_start"] for w in weeks]
+            baseline = [w["demand_baseline"] for w in weeks]
+            disrupted = [w["demand_disrupted"] for w in weeks]
+
+            fig, ax = plt.subplots(figsize=(9, 3))
+            x = range(len(labels))
+            ax.plot(x, baseline, marker="o", label="Baseline (calm)", color="#1f77b4")
+            ax.plot(x, disrupted, marker="s", linestyle="--", label="Disrupted scenario", color="#d62728")
+            ax.fill_between(x, disrupted, baseline, alpha=0.12, color="#d62728")
+            ax.set_xticks(list(x))
+            ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
+            ax.set_ylabel("Demand (units)")
+            ax.set_title(f"5-Week Demand Forecast — {fc.sku_id or 'SKU'}")
+            ax.legend(fontsize=8)
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+        except ImportError:
+            # matplotlib not available — fall back to table
+            pass
+
+        # ── Week-by-week table ────────────────────────────────────────────────
+        with st.expander("Week-by-week forecast table"):
+            import pandas as pd
+            df = pd.DataFrame(weeks)
+            df["demand_drop_%"] = (
+                (df["demand_baseline"] - df["demand_disrupted"]) / df["demand_baseline"] * 100
+            ).round(1)
+            st.dataframe(df, use_container_width=True)
+
+    # ── MAPE comparison ───────────────────────────────────────────────────────
+    if fc.mape_prophet_trend_only is not None and fc.mape_prophet_selected is not None:
+        with st.expander("MAPE benchmark (Prophet vs dataset baseline)"):
+            cols = st.columns(4)
+            cols[0].metric("Trend-only MAPE", f"{fc.mape_prophet_trend_only:.1f}%")
+            cols[1].metric("Selected model MAPE", f"{fc.mape_prophet_selected:.1f}%")
+            if fc.mape_dataset_baseline_avg is not None:
+                cols[2].metric("Dataset baseline MAPE", f"{fc.mape_dataset_baseline_avg:.1f}%")
+            if fc.mape_dataset_ai_avg is not None:
+                cols[3].metric("Dataset AI MAPE", f"{fc.mape_dataset_ai_avg:.1f}%")
+
+
+def show_demand_forecasts() -> None:
+    """Standalone page: browse the 46 pre-computed L5 Prophet forecasts by SKU."""
+    st.title("Demand Forecasts (L5)")
+    st.caption(
+        "Pre-generated 5-week Prophet forecasts for 46 ops_kpi SKUs "
+        "(Electronics scope, weekly grain). Produced by DemandForecastingAgent v3 "
+        "using backtest-ablation regressor selection."
+    )
+
+    json_files = sorted(_FORECAST_OUTPUTS_DIR.glob("forecast_result_SKU*.json"))
+    if not json_files:
+        st.warning(
+            f"No pre-generated forecast files found in `{_FORECAST_OUTPUTS_DIR}`. "
+            "Run `python -m src.agents.forecast.agent --all` from the project root to generate them."
+        )
+        return
+
+    sku_ids = [p.stem.replace("forecast_result_", "") for p in json_files]
+    selected_sku = st.selectbox("Select SKU", sku_ids)
+
+    json_path = _FORECAST_OUTPUTS_DIR / f"forecast_result_{selected_sku}.json"
+    with json_path.open() as fh:
+        data = json.load(fh)
+
+    # ── Top metrics ───────────────────────────────────────────────────────────
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Expected Demand Drop", f"{data.get('expected_drop_pct', 0):.1f}%")
+    if data.get("stockout_prob") is not None:
+        m2.metric("Stockout Probability", f"{data['stockout_prob']:.1%}")
+    if data.get("mape_prophet_selected") is not None:
+        m3.metric("MAPE (selected model)", f"{data['mape_prophet_selected']:.1f}%")
+    if data.get("mape_improvement_pct_vs_dataset_baseline") is not None:
+        m4.metric("MAPE improvement vs baseline", f"{data['mape_improvement_pct_vs_dataset_baseline']:.1f}%")
+
+    regs = data.get("regressors_used") or []
+    st.caption(
+        "Regressors selected: "
+        + (", ".join(f"`{r}`" for r in regs) if regs else "`trend-only`")
+        + f"  ·  Method: `{data.get('regressor_selection_method', 'backtest_ablation')}`"
+    )
+
+    # ── Forecast chart ────────────────────────────────────────────────────────
+    weeks = data.get("demand_forecast") or data.get("prophet_forecast", [])
+    if weeks:
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.ticker as mticker
+
+            labels = [w["week_start"] for w in weeks]
+            baseline = [w["demand_baseline"] for w in weeks]
+            disrupted = [w["demand_disrupted"] for w in weeks]
+
+            fig, ax = plt.subplots(figsize=(9, 3))
+            x = range(len(labels))
+            ax.plot(x, baseline, marker="o", label="Baseline (calm)", color="#1f77b4")
+            ax.plot(x, disrupted, marker="s", linestyle="--", label="Disrupted scenario", color="#d62728")
+            ax.fill_between(x, disrupted, baseline, alpha=0.12, color="#d62728")
+            ax.set_xticks(list(x))
+            ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
+            ax.set_ylabel("Demand (units)")
+            ax.set_title(f"5-Week Demand Forecast — {selected_sku}")
+            ax.legend(fontsize=8)
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+        except ImportError:
+            st.info("Install matplotlib (`pip install matplotlib`) to see the chart.")
+
+        import pandas as pd
+        df = pd.DataFrame(weeks)
+        df["demand_drop_%"] = (
+            (df["demand_baseline"] - df["demand_disrupted"]) / df["demand_baseline"] * 100
+        ).round(1)
+        st.dataframe(df, use_container_width=True)
+
+    # ── MAPE detail ───────────────────────────────────────────────────────────
+    with st.expander("MAPE benchmark"):
+        cols = st.columns(4)
+        cols[0].metric("Trend-only MAPE", f"{data.get('mape_prophet_trend_only', 0):.1f}%")
+        cols[1].metric("Selected model MAPE", f"{data.get('mape_prophet_selected', 0):.1f}%")
+        if data.get("mape_dataset_baseline_avg") is not None:
+            cols[2].metric("Dataset baseline MAPE", f"{data['mape_dataset_baseline_avg']:.1f}%")
+        if data.get("mape_dataset_ai_avg") is not None:
+            cols[3].metric("Dataset AI MAPE", f"{data['mape_dataset_ai_avg']:.1f}%")
+
+    # ── Disruption scenario used ──────────────────────────────────────────────
+    if data.get("disruption_scenario"):
+        ds = data["disruption_scenario"]
+        with st.expander("Disruption scenario parameters"):
+            st.json(ds)
+
+    # ── Agent log ─────────────────────────────────────────────────────────────
+    if data.get("agent_logs"):
+        with st.expander("Agent log"):
+            for line in data["agent_logs"]:
+                st.text(line)
 
 
 def _render_ensemble_signals(rc: RiskClassificationResult) -> None:
@@ -329,12 +517,19 @@ def show_scenario_analyzer() -> None:
 
     # ── Supporting signals ────────────────────────────────────────────────────
     st.subheader("Supporting Signals")
-    s1, s2, s3 = st.columns(3)
+    s1, s3 = st.columns(2)
     s1.metric("Live Weather Severity", f"{result.live_weather_severity:.3f}" if result.live_weather_severity is not None else "N/A")
-    if result.forecast_result:
-        s2.metric("Forecast Demand Drop", f"{result.forecast_result.expected_drop_pct:.1f}%")
     if result.simulation_result:
-        s3.metric("Stockout Probability", f"{result.simulation_result.stockout_probability_pct:.1f}%")
+        s3.metric("Stockout Probability (L6 Monte Carlo)", f"{result.simulation_result.stockout_probability_pct:.1f}%")
+
+    if result.forecast_result:
+        st.divider()
+        _render_demand_forecast(result.forecast_result)
+    else:
+        # L5 was skipped — surface the reason from agent logs
+        l5_logs = [lg for lg in result.agent_logs if lg.startswith("L5:")]
+        if l5_logs:
+            st.info(f"ℹ️ {l5_logs[-1]}")
 
     st.divider()
     _render_impact_simulation(result)
@@ -373,7 +568,7 @@ def main() -> None:
     )
     page = st.sidebar.radio(
         "Navigate",
-        ["Data Ingestion", "Live Data Feed", "RAG Search", "Scenario Analyzer"],
+        ["Data Ingestion", "Live Data Feed", "RAG Search", "Scenario Analyzer", "Demand Forecasts"],
     )
     if page == "Data Ingestion":
         show_data_loader()
@@ -381,6 +576,8 @@ def main() -> None:
         show_ingestion_dashboard()
     elif page == "RAG Search":
         show_rag_search()
+    elif page == "Demand Forecasts":
+        show_demand_forecasts()
     else:
         show_scenario_analyzer()
 

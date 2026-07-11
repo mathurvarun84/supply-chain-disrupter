@@ -32,8 +32,27 @@ class NewsRiskSignal(BaseModel):
 
 
 class ForecastResult(BaseModel):
-    prophet_forecast: List[Dict[str, Any]]
+    # Core fields (required — backward-compatible with prior L5 stub)
+    prophet_forecast: List[Dict[str, Any]] = Field(default_factory=list)  # legacy alias
     expected_drop_pct: float
+
+    # v4 fields
+    demand_forecast: List[Dict[str, Any]] = Field(default_factory=list)   # from selected model
+    model_selected: str = "prophet"
+    model_comparison_scores: Dict[str, Any] = Field(default_factory=dict)
+
+    # Extended fields from DemandForecastingAgent v3+ (all optional)
+    sku_id: Optional[str] = None
+    regressors_used: List[str] = Field(default_factory=list)
+    regressor_selection_method: str = "backtest_ablation"
+    stockout_prob: Optional[float] = None
+    mape_prophet_trend_only: Optional[float] = None
+    mape_prophet_selected: Optional[float] = None
+    mape_dataset_baseline_avg: Optional[float] = None
+    mape_dataset_ai_avg: Optional[float] = None
+    mape_improvement_pct_vs_dataset_baseline: Optional[float] = None
+    disruption_scenario: Optional[Dict[str, Any]] = None
+    forecast_agent_logs: List[str] = Field(default_factory=list)
 
 
 class ForecastHandoff(BaseModel):

@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Literal, Dict
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel
 
 AgentStatus = Literal["Idle", "Running", "Complete", "Skipped-Optional", "Failed-Fallback"]
@@ -111,6 +111,34 @@ class ForecastResponse(BaseModel):
     category: str
     categories: List[str]
     series: List[ForecastPoint]
+
+
+class ForecastWeekPoint(BaseModel):
+    """One week in a per-SKU 5-week Prophet forecast (L5 DemandForecastingAgent v3)."""
+    week_start: str
+    demand_baseline: float
+    demand_disrupted: float
+
+
+class SkuForecastResponse(BaseModel):
+    """Full L5 forecast response for a single SKU."""
+    sku_id: str
+    forecast_horizon_weeks: int
+    regressors_used: List[str]
+    regressor_selection_method: str
+    model_selected: str = "prophet"
+    model_comparison_scores: Dict[str, Any] = {}
+    expected_drop_pct: float
+    stockout_prob: Optional[float]
+    mape_prophet_trend_only: Optional[float]
+    mape_prophet_selected: Optional[float]
+    mape_dataset_baseline_avg: Optional[float]
+    mape_dataset_ai_avg: Optional[float]
+    mape_improvement_pct_vs_dataset_baseline: Optional[float]
+    disruption_scenario: Optional[Dict[str, Any]]
+    demand_forecast: List[ForecastWeekPoint] = []
+    prophet_forecast: List[ForecastWeekPoint] = []  # legacy alias
+    generated_at_utc: Optional[str] = None
 
 
 class SimulationBucket(BaseModel):
