@@ -148,8 +148,14 @@ def build_agent_graph(payload: Dict[str, Any]):
     graph.add_node("l3_weather_monitoring", _critical_node(weather_risk_monitoring_agent))
     graph.add_node("l4_risk_classifier", _critical_node(risk_classifier_agent))
     graph.add_node("l5_demand_forecast", _optional_node(demand_forecasting_agent, "L5"))
+    # L6 owns its Monte Carlo -> heuristic fallback.  Keep the orchestration
+    # guard as a final safety net so L7 can still produce a plan without a
+    # simulation result if an unexpected integration error escapes L6.
     graph.add_node("l6_simulation", _optional_node(simulation_agent, "L6"))
-    graph.add_node("l7_mitigation", _optional_node(mitigation_recommendation_agent, "L7"))
+    # A mitigation plan is the terminal product of the pipeline, not an
+    # optional enrichment.  Let failures surface to the caller instead of
+    # returning an apparently successful state with mitigation_action=None.
+    graph.add_node("l7_mitigation", _critical_node(mitigation_recommendation_agent))
 
     graph.add_edge(START, "l1_data_ingestion")
     graph.add_edge("l1_data_ingestion", "l2_news_analysis")
@@ -167,8 +173,8 @@ def run_agent_graph(payload: Dict[str, Any]) -> GlobalState:
     """
     Execute the full LangGraph agent pipeline.
 
-    Critical path: L1 -> L2 -> L3 -> L4
-    Optional:      L5 (Prophet) -> L6 (Simulation) -> L7 (Mitigation)
+    Critical path: L1 -> L2 -> L3 -> L4 -> L7 (Mitigation)
+    Optional enrichments before L7: L5 (Prophet) -> L6 (Simulation)
     """
     app = build_agent_graph(payload)
     result = app.invoke(GlobalState())
@@ -189,6 +195,7 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
     state = _merge_state(state, risk_classifier_agent(state))
     state = _run_optional(state, demand_forecasting_agent, "L5")
     state = _run_optional(state, simulation_agent, "L6")
-    state = _run_optional(state, mitigation_recommendation_agent, "L7")
+    # Match the compiled graph: L7 is required and its failures must surface.
+    state = _merge_state(state, mitigation_recommendation_agent(state))
 
     return state
