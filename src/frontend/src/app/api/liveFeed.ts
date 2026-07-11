@@ -12,8 +12,7 @@ import type {
   LiveFeedGanttResponse,
   RefreshTriggeredResponse,
 } from "../types/liveFeed";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string;
+import { API_BASE_URL } from "./config";
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`);
