@@ -218,18 +218,37 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
             state = state.model_copy(update={"langfuse_span": span})
             state = _merge_state(state, risk_classifier_agent(state))
 
-        # L5/L6/L7 are optional — agent_span wraps _run_optional so caught
-        # failures still produce Failed-Fallback rows instead of vanishing.
-        with agent_span(trace, run_id, "L5_forecast") as span:
-            state = state.model_copy(update={"langfuse_span": span})
-            state = _run_optional(state, demand_forecasting_agent, "L5")
+        # L5/L6/L7 are optional. Exceptions must propagate INTO agent_span so it
+        # can write Failed-Fallback before re-raising; we catch the re-raise outside
+        # the `with` block and swallow it with a SKIPPED log entry.
+        try:
+            with agent_span(trace, run_id, "L5_forecast") as span:
+                state = state.model_copy(update={"langfuse_span": span})
+                state = _merge_state(state, demand_forecasting_agent(state))
+        except Exception as exc:
+            logger.warning("L5 skipped: %s", exc)
+            state = state.model_copy(
+                update={"agent_logs": state.agent_logs + [f"L5: SKIPPED - {exc}"]}
+            )
 
-        with agent_span(trace, run_id, "L6_simulation") as span:
-            state = state.model_copy(update={"langfuse_span": span})
-            state = _run_optional(state, simulation_agent, "L6")
+        try:
+            with agent_span(trace, run_id, "L6_simulation") as span:
+                state = state.model_copy(update={"langfuse_span": span})
+                state = _merge_state(state, simulation_agent(state))
+        except Exception as exc:
+            logger.warning("L6 skipped: %s", exc)
+            state = state.model_copy(
+                update={"agent_logs": state.agent_logs + [f"L6: SKIPPED - {exc}"]}
+            )
 
-        with agent_span(trace, run_id, "L7_mitigation") as span:
-            state = state.model_copy(update={"langfuse_span": span})
-            state = _run_optional(state, mitigation_recommendation_agent, "L7")
+        try:
+            with agent_span(trace, run_id, "L7_mitigation") as span:
+                state = state.model_copy(update={"langfuse_span": span})
+                state = _merge_state(state, mitigation_recommendation_agent(state))
+        except Exception as exc:
+            logger.warning("L7 skipped: %s", exc)
+            state = state.model_copy(
+                update={"agent_logs": state.agent_logs + [f"L7: SKIPPED - {exc}"]}
+            )
 
     return state
