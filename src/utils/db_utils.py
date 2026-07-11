@@ -62,6 +62,56 @@ def ensure_schema() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_execution_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                duration_ms REAL,
+                error_message TEXT,
+                langfuse_trace_id TEXT,
+                langfuse_span_id TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_preview TEXT,
+                full_prompt TEXT,
+                full_response TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                total_tokens INTEGER,
+                cost_usd REAL,
+                latency_ms REAL,
+                status TEXT NOT NULL,
+                retry_count INTEGER DEFAULT 0,
+                error_message TEXT,
+                langfuse_trace_id TEXT,
+                langfuse_generation_id TEXT,
+                ts TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_call_log_run_id ON llm_call_log(run_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_llm_call_log_agent ON llm_call_log(agent_name)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_execution_log_run_id ON agent_execution_log(run_id)"
+        )
     ensure_simulation_schema()
 
 
@@ -256,6 +306,89 @@ def insert_mitigation_action(
     )
 
 
+def insert_llm_call_log(**kwargs) -> None:
+    """Persist one LLM call record. Accepts all llm_call_log columns as keyword args."""
+    execute_non_query(
+        """
+        INSERT INTO llm_call_log (
+            run_id, agent_name, model, prompt_preview, full_prompt, full_response,
+            input_tokens, output_tokens, total_tokens, cost_usd, latency_ms,
+            status, retry_count, error_message, langfuse_trace_id, langfuse_generation_id
+        ) VALUES (
+            :run_id, :agent_name, :model, :prompt_preview, :full_prompt, :full_response,
+            :input_tokens, :output_tokens, :total_tokens, :cost_usd, :latency_ms,
+            :status, :retry_count, :error_message, :langfuse_trace_id, :langfuse_generation_id
+        )
+        """,
+        {
+            "run_id": kwargs.get("run_id"),
+            "agent_name": kwargs.get("agent_name"),
+            "model": kwargs.get("model"),
+            "prompt_preview": kwargs.get("prompt_preview"),
+            "full_prompt": kwargs.get("full_prompt"),
+            "full_response": kwargs.get("full_response"),
+            "input_tokens": kwargs.get("input_tokens", 0),
+            "output_tokens": kwargs.get("output_tokens", 0),
+            "total_tokens": kwargs.get("total_tokens", 0),
+            "cost_usd": kwargs.get("cost_usd", 0.0),
+            "latency_ms": kwargs.get("latency_ms", 0.0),
+            "status": kwargs.get("status", "success"),
+            "retry_count": kwargs.get("retry_count", 0),
+            "error_message": kwargs.get("error_message"),
+            "langfuse_trace_id": kwargs.get("langfuse_trace_id"),
+            "langfuse_generation_id": kwargs.get("langfuse_generation_id"),
+        },
+    )
+
+
+def insert_agent_execution(**kwargs) -> None:
+    """Insert a new agent execution row with status=Running."""
+    execute_non_query(
+        """
+        INSERT INTO agent_execution_log (run_id, agent_name, status, started_at)
+        VALUES (:run_id, :agent_name, :status, :started_at)
+        """,
+        {
+            "run_id": kwargs.get("run_id"),
+            "agent_name": kwargs.get("agent_name"),
+            "status": kwargs.get("status", "Running"),
+            "started_at": kwargs.get("started_at"),
+        },
+    )
+
+
+def update_agent_execution(run_id: str, agent_name: str, **kwargs) -> None:
+    """Update an existing agent execution row (status, timing, error, Langfuse ids)."""
+    execute_non_query(
+        """
+        UPDATE agent_execution_log
+        SET status = :status,
+            completed_at = :completed_at,
+            duration_ms = :duration_ms,
+            error_message = :error_message,
+            langfuse_trace_id = :langfuse_trace_id,
+            langfuse_span_id = :langfuse_span_id,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE run_id = :run_id AND agent_name = :agent_name
+          AND id = (
+              SELECT id FROM agent_execution_log
+              WHERE run_id = :run_id AND agent_name = :agent_name
+              ORDER BY id DESC LIMIT 1
+          )
+        """,
+        {
+            "run_id": run_id,
+            "agent_name": agent_name,
+            "status": kwargs.get("status"),
+            "completed_at": kwargs.get("completed_at"),
+            "duration_ms": kwargs.get("duration_ms"),
+            "error_message": kwargs.get("error_message"),
+            "langfuse_trace_id": kwargs.get("langfuse_trace_id"),
+            "langfuse_span_id": kwargs.get("langfuse_span_id"),
+        },
+    )
+
+
 def ensure_simulation_schema() -> None:
     """Create simulation_runs audit table."""
     with get_connection() as conn:
@@ -368,7 +501,10 @@ def fetch_ops_kpi_priors(sku: str, region: str) -> Optional[Dict[str, float]]:
 
 
 def ensure_risk_classification_table() -> None:
-    """Create risk_classifications table if it doesn't exist."""
+    """Create risk_classifications table if it doesn't exist, and add
+    full_result_json to pre-existing tables that predate it (ALTER TABLE
+    is a no-op-safe upgrade path — CREATE TABLE IF NOT EXISTS alone would
+    not add a new column to an already-existing table on disk)."""
     with get_connection() as conn:
         conn.execute(
             """
@@ -387,10 +523,14 @@ def ensure_risk_classification_table() -> None:
                 escalated       INTEGER,
                 rag_citations   TEXT,
                 rationale       TEXT,
+                full_result_json TEXT,
                 run_ts          TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_classifications)")}
+        if "full_result_json" not in existing_cols:
+            conn.execute("ALTER TABLE risk_classifications ADD COLUMN full_result_json TEXT")
 
 
 def insert_risk_classification(
@@ -407,7 +547,15 @@ def insert_risk_classification(
     escalated: bool,
     rag_citations: List[str],
     rationale: str,
+    full_result_json: Optional[str] = None,
 ) -> None:
+    """Persist one L4 classification run. full_result_json, when provided,
+    is a serialized RiskClassificationResult (rule/distilbert/llm/judge
+    signals) so a later cache-hit read (fetch_risk_classification) can
+    return the complete ensemble detail instead of rule-signal-only —
+    see risk.py's _response_from_cached_row. Rows inserted before this
+    column existed simply have it NULL, and the reader falls back to the
+    rule-only view for those."""
     import json as _json
     ensure_risk_classification_table()
     execute_non_query(
@@ -415,8 +563,8 @@ def insert_risk_classification(
         INSERT INTO risk_classifications
           (order_id, mode, composite_score, geo_component, supply_component,
            freight_component, defect_component, duration_days, base_label,
-           final_label, escalated, rag_citations, rationale)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           final_label, escalated, rag_citations, rationale, full_result_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             order_id, mode, round(composite_score, 4),
@@ -424,8 +572,47 @@ def insert_risk_classification(
             round(freight_component, 4), round(defect_component, 4),
             duration_days, base_label, final_label,
             int(escalated), _json.dumps(rag_citations), rationale,
+            full_result_json,
         ),
     )
+
+
+def fetch_record_by_order_id(order_id: int) -> Optional[Dict[str, Any]]:
+    """Resolve an order_id to its most recent daily_records row — the
+    (event_date, port, sku) shape risk_classifier_agent's record dict
+    needs. Used by GET /api/risk-classification/{run_id} (Screen 2) to
+    turn the run_id (== order_id) path param into a record before
+    invoking the ensemble directly, without running the full LangGraph
+    pipeline."""
+    rows = execute_query(
+        "SELECT * FROM daily_records WHERE order_id = ? ORDER BY record_id DESC LIMIT 1",
+        (order_id,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def fetch_risk_classification(order_id: int) -> Optional[Dict[str, Any]]:
+    """Read back the most recently persisted ensemble result for an
+    order_id from risk_classifications. Returns None if this order has
+    never been classified — the caller (Screen 2's API handler) computes
+    it live in that case. Read counterpart to insert_risk_classification."""
+    rows = execute_query(
+        "SELECT * FROM risk_classifications WHERE order_id = ? ORDER BY id DESC LIMIT 1",
+        (order_id,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def fetch_latest_classified_order_id() -> Optional[int]:
+    """Return the order_id of the most recently persisted classification,
+    or the most recent daily_records order if none have been classified
+    yet. Backs GET /api/risk-classification/latest (Screen 2's default
+    view before a demo-scenario/record picker exists)."""
+    rows = execute_query("SELECT order_id FROM risk_classifications ORDER BY id DESC LIMIT 1")
+    if rows:
+        return int(rows[0]["order_id"])
+    rows = execute_query("SELECT order_id FROM daily_records ORDER BY record_id DESC LIMIT 1")
+    return int(rows[0]["order_id"]) if rows else None
 
 
 def fetch_scenario_options() -> List[Dict[str, Any]]:

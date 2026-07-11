@@ -306,6 +306,13 @@ class GlobalState(BaseModel):
     mitigation_llm: Optional[MitigationLLMOutput] = None
     judge_verdict: Optional[JudgeVerdict] = None
 
+    # Observability fields — set by the orchestrator before each agent call.
+    # exclude=True prevents non-serializable Langfuse SDK objects from leaking
+    # into model_dump_json() calls (API responses, agent_logs serialization, etc.)
+    run_id: Optional[str] = None
+    langfuse_trace: Optional[Any] = Field(default=None, exclude=True)
+    langfuse_span: Optional[Any] = Field(default=None, exclude=True)
+
     @property
     def risk_label(self) -> Optional[str]:
         """Deprecated shim — read risk_classification.final_label instead."""

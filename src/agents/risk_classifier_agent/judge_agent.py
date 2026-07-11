@@ -9,7 +9,7 @@ Returns JudgeVerdict or None on failure — never raises.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional  # Any used for trace/span opaque handles
 
 from src.agents.state import (
     DistilBERTSignal,
@@ -198,6 +198,9 @@ def run_judge(
     llm_signal: Optional[LLMSignal],
     record: dict,
     semiconductor_rows: List[dict],
+    run_id: Optional[str] = None,
+    trace: Any = None,
+    span: Any = None,
 ) -> Optional[JudgeVerdict]:
     """
     Run LLM-as-Judge over all three signals. Returns None on failure — never raises.
@@ -223,6 +226,10 @@ def run_judge(
             response_model=JudgeVerdict,
             model=MODEL_REASONING,
             max_tokens=768,
+            run_id=run_id,
+            agent_name="L4_judge",
+            trace=trace,
+            span=span,
         )
 
         # Enforce hard rule: Shipping canceled → CRITICAL

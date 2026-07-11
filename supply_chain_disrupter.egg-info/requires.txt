@@ -1,0 +1,16 @@
+chromadb<2,>=1.5
+feedparser<7,>=6
+openpyxl<4,>=3.1
+pandas<4,>=2.2
+prophet<2,>=1.1
+pydantic<3,>=2.7
+pypdf<7,>=6
+python-docx<2,>=1.2
+pyyaml<7,>=6
+requests<3,>=2.31
+sentence-transformers<6,>=5
+streamlit<2,>=1.40
+langgraph<2,>=1.2
+
+[dev]
+pytest<10,>=8
