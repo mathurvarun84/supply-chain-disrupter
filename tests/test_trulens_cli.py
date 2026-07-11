@@ -20,6 +20,14 @@ def test_run_command_calls_run_with_trulens_with_scenario_payload():
     assert payload["affected_port"] == "Chennai"
     assert payload["sku"] == "CHIP-001"
     assert payload["event_date"] == "2024-03-15"
+    # EventMetadata (src/agents/state.py) requires these too — discovered as
+    # a real gap during Task 13 manual verification (L1 raised a pydantic
+    # ValidationError with only port/sku/event_date supplied).
+    required_event_metadata_fields = {
+        "disruption_type", "affected_route", "severity",
+        "shock_duration_days", "recovery_window_days", "synthetic_ratio",
+    }
+    assert required_event_metadata_fields.issubset(payload.keys())
 
 
 def test_dashboard_command_calls_launch_dashboard():

@@ -24,6 +24,15 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--port", required=True)
     run_parser.add_argument("--sku", required=True)
     run_parser.add_argument("--event-date", required=True)
+    # EventMetadata (src/agents/state.py) requires these beyond port/sku/date;
+    # defaults describe a generic moderate disruption so `run` is usable
+    # without spelling out every field for a quick manual check.
+    run_parser.add_argument("--disruption-type", default="geopolitical")
+    run_parser.add_argument("--affected-route", default=None)
+    run_parser.add_argument("--severity", type=float, default=0.6)
+    run_parser.add_argument("--shock-duration-days", type=int, default=3)
+    run_parser.add_argument("--recovery-window-days", type=int, default=30)
+    run_parser.add_argument("--synthetic-ratio", type=float, default=0.0)
 
     sub.add_parser("dashboard", help="Launch the TruLens dashboard on port 8502")
 
@@ -43,6 +52,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "affected_port": args.port,
             "sku": args.sku,
             "event_date": args.event_date,
+            "disruption_type": args.disruption_type,
+            "affected_route": args.affected_route or f"{args.port} regional route",
+            "severity": args.severity,
+            "shock_duration_days": args.shock_duration_days,
+            "recovery_window_days": args.recovery_window_days,
+            "synthetic_ratio": args.synthetic_ratio,
         }
         result = run_with_trulens(payload)
         print(f"risk_label={result.risk_label}")
