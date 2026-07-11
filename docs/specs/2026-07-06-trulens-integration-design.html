@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TruLens Observability & Evaluation Design Spec (Phase 1)</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+            color: #333;
+            background: #fafafa;
+        }
+        h1 {
+            color: #1a1a2e;
+            border-bottom: 3px solid #4a90d9;
+            padding-bottom: 0.5rem;
+        }
+        h2 {
+            color: #16213e;
+            margin-top: 2rem;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 0.3rem;
+        }
+        h3 {
+            color: #1a1a2e;
+            margin-top: 1.5rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.75rem;
+            text-align: left;
+        }
+        th {
+            background: #4a90d9;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        pre {
+            background: #1a1a2e;
+            color: #e8e8e8;
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 0.9rem;
+        }
+        code {
+            background: #e8e8e8;
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.9rem;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+        }
+        .metadata {
+            background: #e8f4f8;
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 2rem;
+        }
+        .metadata p {
+            margin: 0.3rem 0;
+        }
+        .architecture-diagram {
+            background: #1a1a2e;
+            color: #e8e8e8;
+            padding: 1rem;
+            border-radius: 6px;
+            font-family: monospace;
+            white-space: pre;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+        .file-tree {
+            background: #f5f5f5;
+            padding: 1rem;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+        .highlight {
+            background: #fff3cd;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>TruLens Observability & Evaluation Design Spec (Phase 1)</h1>
+
+<div class="metadata">
+    <p><strong>Date:</strong> 2026-07-06</p>
+    <p><strong>Status:</strong> Approved</p>
+    <p><strong>Author:</strong> Claude + User collaboration</p>
+</div>
+
+<h2>Overview</h2>
+<p>Add TruLens observability and evaluation to the LangGraph agent pipeline (L1-L7) for development debugging, production monitoring, and capstone demonstration. The integration is fully non-invasive — zero changes to agent code in <code>src/agents/</code>.</p>
+
+<p><strong>This spec covers two capabilities:</strong></p>
+<ul>
+    <li><strong>Observability</strong> — Per-node latency, token usage, input/output tracing</li>
+    <li><strong>Evaluation</strong> — Async feedback functions for risk drift, ensemble agreement, latency thresholds, forecast accuracy</li>
+</ul>
+
+<h2>Requirements</h2>
+<table>
+    <tr><th>Requirement</th><th>Detail</th></tr>
+    <tr><td>Primary goals</td><td>Development debugging, production monitoring, capstone demo</td></tr>
+    <tr><td>Agent code changes</td><td>Zero — all instrumentation external</td></tr>
+    <tr><td>RAGAS coexistence</td><td>Critical — must not break existing evaluation</td></tr>
+    <tr><td>Pipeline coverage</td><td>Full (L1-L7), no gaps</td></tr>
+    <tr><td>Storage</td><td>SQLite at <code>data/trulens/trulens.db</code></td></tr>
+    <tr><td>Key metrics</td><td>Risk drift, ensemble agreement, latency, tokens, forecast accuracy</td></tr>
+</table>
+
+<h2>Architecture</h2>
+<div class="architecture-diagram">┌─────────────────────────────────────────────────────────────────┐
+│                Production Code (UNCHANGED)                      │
+│  src/agents/langgraph_engine.py                                 │
+│  └── run_agent_graph(payload) → L1→L2→L3→L4→L5→L6→L7           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────▼───────────────┐
+              │   TruLens Wrapper Layer       │
+              │   (src/evaluation/trulens/)   │
+              │                               │
+              │  ┌─────────────────────────┐  │
+              │  │ run_with_trulens()      │  │  ← New entry point
+              │  │  - Patches nodes        │  │
+              │  │  - Patches OpenAI calls │  │
+              │  │  - Records to TruLens   │  │
+              │  └─────────────────────────┘  │
+              │                               │
+              │  ┌─────────────────────────┐  │
+              │  │ Feedback Functions      │  │  ← Custom metrics
+              │  │  - risk_score_stability │  │
+              │  │  - ensemble_agreement   │  │
+              │  │  - node_latency         │  │
+              │  │  - forecast_accuracy    │  │
+              │  └─────────────────────────┘  │
+              └───────────────┬───────────────┘
+                              │
+              ┌───────────────▼───────────────┐
+              │  data/trulens/trulens.db      │  ← SQLite persistence
+              └───────────────────────────────┘
+                              │
+              ┌───────────────▼───────────────┐
+              │  TruLens Dashboard (:8502)    │  ← Separate from Streamlit
+              └───────────────────────────────┘</div>
+
+<p>Production code never imports from <code>src/evaluation/</code>. The wrapper imports production code and wraps it externally.</p>
+
+<h2>File Structure</h2>
+<div class="file-tree">src/evaluation/trulens_integration/
+├── __init__.py              # Exports run_with_trulens, launch_dashboard
+├── config.py                # TruLens session + SQLite backend init
+├── wrapper.py               # Core instrumentation (patches graph + OpenAI)
+├── openai_patch.py          # Monkey-patch call_openai_structured
+├── feedback_functions.py    # 4 custom metrics
+├── node_extractors.py       # Extract metrics from GlobalState per node
+└── cli.py                   # CLI: run, dashboard, query commands
+
+src/evaluation/
+└── patch_registry.py        # Coordinates TruLens/RAGAS patching
+
+evaluation/
+└── trulens_runner.py        # Batch evaluation over test scenarios</div>
+
+<h3>Module Responsibilities</h3>
+<table>
+    <tr><th>Module</th><th>Purpose</th></tr>
+    <tr><td><code>config.py</code></td><td>Initialize <code>Tru()</code> session with SQLite at <code>data/trulens/trulens.db</code>, configure OpenAI provider</td></tr>
+    <tr><td><code>wrapper.py</code></td><td>Context manager that patches <code>run_agent_graph</code>, captures per-node telemetry, registers with TruLens recorder</td></tr>
+    <tr><td><code>openai_patch.py</code></td><td>Patches <code>call_openai_structured</code> to capture model, tokens, latency, prompt/response</td></tr>
+    <tr><td><code>feedback_functions.py</code></td><td>Implements <code>risk_score_stability</code>, <code>ensemble_agreement</code>, <code>node_latency_check</code>, <code>forecast_accuracy</code></td></tr>
+    <tr><td><code>node_extractors.py</code></td><td>Functions to pull metrics from <code>GlobalState</code> after each agent (e.g., L4 → composite_score, signals)</td></tr>
+    <tr><td><code>cli.py</code></td><td>Entry points: <code>python -m src.evaluation.trulens_integration.cli run/dashboard/query</code></td></tr>
+    <tr><td><code>patch_registry.py</code></td><td>Prevents TruLens and RAGAS from patching same function simultaneously</td></tr>
+    <tr><td><code>trulens_runner.py</code></td><td>Loads test cases from <code>evaluation/ragas/test_dataset.json</code>, runs each through instrumented pipeline</td></tr>
+</table>
+
+<h2>Custom Feedback Functions</h2>
+<p>Four domain-specific metrics that run asynchronously after each pipeline execution:</p>
+
+<table>
+    <tr><th>Function</th><th>What it Measures</th><th>How it's Computed</th><th>Target</th></tr>
+    <tr><td><code>risk_score_stability</code></td><td>Risk score drift over time</td><td>Coefficient of variation of <code>composite_score</code> across last 30 runs</td><td>CV &lt; 0.30</td></tr>
+    <tr><td><code>ensemble_agreement</code></td><td>L4 classifier confidence</td><td>Fraction of runs where Rule/DistilBERT/LLM signals agree (2+ match)</td><td>&gt; 0.66</td></tr>
+    <tr><td><code>node_latency_check</code></td><td>Per-node performance</td><td>Binary pass/fail per node against thresholds (L2/L3 &lt; 2s, L4 &lt; 5s, total &lt; 15s)</td><td>All pass</td></tr>
+    <tr><td><code>forecast_accuracy</code></td><td>Prophet prediction quality</td><td>1 - abs(predicted_drop - actual_drop) / max(predicted, actual) when actuals available</td><td>&gt; 0.80</td></tr>
+</table>
+
+<h3>Data Sources</h3>
+<ul>
+    <li><code>risk_score_stability</code> → queries historical <code>risk_classification.composite_score</code> from TruLens DB</li>
+    <li><code>ensemble_agreement</code> → extracts <code>rule_signal</code>, <code>distilbert_signal</code>, <code>llm_signal</code> from L4 output</li>
+    <li><code>node_latency_check</code> → captured by wrapper during execution (start/end timestamps per node)</li>
+    <li><code>forecast_accuracy</code> → compares <code>forecast_result.expected_drop_pct</code> vs ground truth (when available in test dataset)</li>
+</ul>
+
+<h2>RAGAS Coexistence</h2>
+<p>Both TruLens and RAGAS monkey-patch <code>call_openai_structured</code>. A patch registry prevents conflicts.</p>
+
+<h3>Patch Registry (<code>src/evaluation/patch_registry.py</code>)</h3>
+<pre><code>_active_patches = {}  # {"call_openai_structured": "trulens" | "ragas"}
+
+def claim_patch(target: str, owner: str) -> bool:
+    """Returns True if patch granted, False if already claimed by another."""
+    if target in _active_patches and _active_patches[target] != owner:
+        return False
+    _active_patches[target] = owner
+    return True
+
+def release_patch(target: str, owner: str):
+    if _active_patches.get(target) == owner:
+        del _active_patches[target]</code></pre>
+
+<h3>Usage Pattern</h3>
+<ul>
+    <li>TruLens wrapper calls <code>claim_patch("call_openai_structured", "trulens")</code> before patching</li>
+    <li>RAGAS tracer calls <code>claim_patch("call_openai_structured", "ragas")</code> before patching</li>
+    <li>If claim fails, skip patching that target (log warning, continue with partial instrumentation)</li>
+    <li>Both release on context manager exit</li>
+    <li>First one wins; they rarely run simultaneously</li>
+</ul>
+
+<h2>Entry Points</h2>
+
+<h3>1. CLI Commands</h3>
+<pre><code># Run a single scenario with instrumentation
+python -m src.evaluation.trulens_integration.cli run \
+  --port "Chennai" --sku "CHIP-001" --event-date "2024-03-15"
+
+# Launch dashboard (port 8502)
+python -m src.evaluation.trulens_integration.cli dashboard
+
+# Query historical metrics
+python -m src.evaluation.trulens_integration.cli query \
+  --metric risk_drift --days 30</code></pre>
+
+<h3>2. Batch Evaluation Runner</h3>
+<pre><code># Run all test scenarios from RAGAS test dataset
+python -m evaluation.trulens_runner
+
+# Output: evaluation/trulens_scores.json</code></pre>
+
+<h3>3. Programmatic API</h3>
+<pre><code>from src.evaluation.trulens_integration import run_with_trulens
+
+# Drop-in replacement for run_agent_graph
+result = run_with_trulens(payload)
+# Returns same GlobalState, but execution is traced</code></pre>
+
+<h3>Dashboard</h3>
+<ul>
+    <li>Runs on port <span class="highlight">8502</span> (Streamlit app runs on 8501)</li>
+    <li>Shows execution timeline with per-node breakdown</li>
+    <li>Displays feedback scores over time</li>
+    <li>Provides trace explorer for drill-down</li>
+    <li>Tracks token usage and cost</li>
+</ul>
+
+<h2>Testing &amp; Verification</h2>
+
+<h3>Unit Tests</h3>
+<table>
+    <tr><th>Test</th><th>Verifies</th></tr>
+    <tr><td><code>test_wrapper_captures_latency</code></td><td>Wrapper records start/end time for each node</td></tr>
+    <tr><td><code>test_openai_patch_captures_tokens</code></td><td>Patch extracts prompt_tokens, completion_tokens from response</td></tr>
+    <tr><td><code>test_feedback_functions_compute</code></td><td>Each of 4 feedback functions returns valid 0-1 score</td></tr>
+    <tr><td><code>test_patch_registry_prevents_conflicts</code></td><td>Second patcher gets rejected, first one works</td></tr>
+</table>
+
+<h3>Integration Tests</h3>
+<table>
+    <tr><th>Test</th><th>Verifies</th></tr>
+    <tr><td><code>test_full_pipeline_with_trulens</code></td><td>Run Taiwan earthquake scenario, verify trace in SQLite</td></tr>
+    <tr><td><code>test_ragas_coexistence</code></td><td>Run RAGAS evaluation, then TruLens — both work independently</td></tr>
+    <tr><td><code>test_dashboard_launches</code></td><td>CLI <code>dashboard</code> command starts server on 8502</td></tr>
+</table>
+
+<h3>Manual Verification Checklist</h3>
+<ol>
+    <li>Run <code>python -m src.evaluation.trulens_integration.cli run --port Chennai --sku CHIP-001</code></li>
+    <li>Open <code>http://localhost:8502</code> — verify trace appears</li>
+    <li>Check L1-L7 latency breakdown visible in dashboard</li>
+    <li>Compare token counts with existing <code>[LLM]</code> log lines — should match</li>
+    <li>Run <code>python -m evaluation.trulens_runner</code> — verify <code>trulens_scores.json</code> created</li>
+</ol>
+
+<h2>Dependencies</h2>
+<p>Add to <code>requirements.txt</code>:</p>
+<pre><code>trulens-eval>=0.31.0,<1.0</code></pre>
+
+<h2>Out of Scope</h2>
+<ul>
+    <li>Distributed tracing for batch ingestion jobs</li>
+    <li>A/B testing different LLM models</li>
+    <li>Automated retraining triggers</li>
+    <li>ML-based drift prediction</li>
+    <li>Multi-user cloud dashboard</li>
+</ul>
+
+</body>
+</html>

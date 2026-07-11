@@ -37,6 +37,12 @@ test_master_v3_output.txt
 # RAGAS trace captures (regenerated per run; test_dataset.json IS committed)
 evaluation/ragas/traces/
 
+# TruLens batch scenario runner output (regenerated per run)
+evaluation/trulens_scores.json
+
+# Editor swap files (can contain fragments of secrets from open files, e.g. .env.swp)
+*.swp
+
 # Jupyter
 .ipynb_checkpoints/
 

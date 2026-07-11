@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TruLens Guardrails Design Spec (Phase 2)</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+            color: #333;
+            background: #fafafa;
+        }
+        h1 {
+            color: #1a1a2e;
+            border-bottom: 3px solid #e74c3c;
+            padding-bottom: 0.5rem;
+        }
+        h2 {
+            color: #16213e;
+            margin-top: 2rem;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 0.3rem;
+        }
+        h3 {
+            color: #1a1a2e;
+            margin-top: 1.5rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 0.75rem;
+            text-align: left;
+        }
+        th {
+            background: #e74c3c;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background: #f9f9f9;
+        }
+        pre {
+            background: #1a1a2e;
+            color: #e8e8e8;
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 0.9rem;
+        }
+        code {
+            background: #e8e8e8;
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.9rem;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+        }
+        .metadata {
+            background: #fdecea;
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 2rem;
+            border-left: 4px solid #e74c3c;
+        }
+        .metadata p {
+            margin: 0.3rem 0;
+        }
+        .architecture-diagram {
+            background: #1a1a2e;
+            color: #e8e8e8;
+            padding: 1rem;
+            border-radius: 6px;
+            font-family: monospace;
+            white-space: pre;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+        .file-tree {
+            background: #f5f5f5;
+            padding: 1rem;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+        .highlight {
+            background: #fdecea;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+        }
+        .pass {
+            color: #27ae60;
+            font-weight: bold;
+        }
+        .fail {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+        .guardrail-section {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+        .guardrail-section h4 {
+            margin-top: 0;
+            color: #e74c3c;
+        }
+        ul {
+            padding-left: 1.5rem;
+        }
+        li {
+            margin: 0.3rem 0;
+        }
+    </style>
+</head>
+<body>
+
+<h1>TruLens Guardrails Design Spec (Phase 2)</h1>
+
+<div class="metadata">
+    <p><strong>Date:</strong> 2026-07-08</p>
+    <p><strong>Status:</strong> Approved</p>
+    <p><strong>Author:</strong> Claude + User collaboration</p>
+    <p><strong>Dependency:</strong> Phase 1 — TruLens Observability (2026-07-06)</p>
+</div>
+
+<h2>Overview</h2>
+<p>Add runtime guardrails to validate LLM agent outputs in the LangGraph pipeline. Guardrails run synchronously after each LLM agent, log violations to the TruLens dashboard, and allow the pipeline to continue (soft enforcement).</p>
+
+<h2>Goals</h2>
+<ol>
+    <li><strong>Validate LLM outputs</strong> — Catch out-of-bounds values, invalid categories, missing citations</li>
+    <li><strong>Soft enforcement</strong> — Log violations to dashboard, don't halt execution</li>
+    <li><strong>Coverage</strong> — All LLM agents (L2 News, L3 Weather, L4 Risk Classifier)</li>
+    <li><strong>Visibility</strong> — Violations appear in TruLens dashboard with details</li>
+</ol>
+
+<h2>Non-Goals (Out of Scope)</h2>
+<ul>
+    <li>Hard enforcement (halting pipeline on failure)</li>
+    <li>Automatic retry/fallback mechanisms</li>
+    <li>Non-LLM agents (L1, L5, L6, L7)</li>
+    <li>Custom guardrails UI beyond TruLens dashboard</li>
+</ul>
+
+<h2>Requirements</h2>
+<table>
+    <tr><th>Requirement</th><th>Detail</th></tr>
+    <tr><td>Dependency</td><td>Phase 1 TruLens integration must be implemented first</td></tr>
+    <tr><td>Failure mode</td><td>Log and continue (soft enforcement)</td></tr>
+    <tr><td>Agents covered</td><td>L2 News, L3 Weather, L4 Risk Classifier</td></tr>
+    <tr><td>Guardrail count</td><td>8 total (2 for L2, 2 for L3, 4 for L4)</td></tr>
+</table>
+
+<h2>Guardrail Definitions</h2>
+
+<div class="guardrail-section">
+    <h4>L2 News Agent Guardrails</h4>
+    <table>
+        <tr><th>Guardrail</th><th>Check</th><th>Pass Condition</th></tr>
+        <tr><td><code>l2_severity_bounds</code></td><td><code>news_analysis_llm.news_severity_component</code></td><td>Value in [0.0, 1.0]</td></tr>
+        <tr><td><code>l2_category_valid</code></td><td><code>news_analysis_llm.category</code></td><td>One of: <code>weather</code>, <code>geopolitical</code>, <code>logistics</code>, <code>demand</code>, <code>supplier</code>, <code>regulatory</code>, <code>other</code></td></tr>
+    </table>
+</div>
+
+<div class="guardrail-section">
+    <h4>L3 Weather Agent Guardrails</h4>
+    <table>
+        <tr><th>Guardrail</th><th>Check</th><th>Pass Condition</th></tr>
+        <tr><td><code>l3_geo_risk_bounds</code></td><td><code>live_weather_severity</code></td><td>Value in [0.0, 1.0] and not None</td></tr>
+        <tr><td><code>l3_hub_coverage</code></td><td>Weather data exists for active hub</td><td><code>active_record["port"]</code> has corresponding weather signal</td></tr>
+    </table>
+</div>
+
+<div class="guardrail-section">
+    <h4>L4 Risk Classifier Guardrails</h4>
+    <table>
+        <tr><th>Guardrail</th><th>Check</th><th>Pass Condition</th></tr>
+        <tr><td><code>l4_composite_bounds</code></td><td><code>risk_classification.composite_score</code></td><td>Value in [0.0, 1.0]</td></tr>
+        <tr><td><code>l4_label_score_alignment</code></td><td>Label matches score tier</td><td>LOW: &lt;0.3, MEDIUM: 0.3-0.5, HIGH: 0.5-0.7, CRITICAL: &gt;0.7</td></tr>
+        <tr><td><code>l4_ensemble_coherence</code></td><td>Signal agreement</td><td>≥2 of 3 signals (rule, distilbert, llm) agree on tier</td></tr>
+        <tr><td><code>l4_citation_required</code></td><td>RAG grounding for high-risk</td><td>HIGH/CRITICAL labels have ≥1 entry in <code>rag_citations</code></td></tr>
+    </table>
+</div>
+
+<h3>Guardrail Output Format</h3>
+<p>Each guardrail returns:</p>
+<pre><code>{
+    "passed": bool,
+    "score": float,      # 1.0 if passed, 0.0 if failed
+    "message": str,      # Human-readable explanation
+    "details": dict      # Actual values for debugging
+}</code></pre>
+
+<h2>Architecture</h2>
+
+<h3>Pipeline Integration</h3>
+<div class="architecture-diagram">┌─────────────────────────────────────────────────────────────────────────┐
+│                         Pipeline Execution                              │
+│                                                                         │
+│   L1 ──→ L2 ──→ L3 ──→ L4 ──→ L5 ──→ L6 ──→ L7                        │
+│          │      │      │                                                │
+│          ▼      ▼      ▼                                                │
+│       ┌─────┐┌─────┐┌─────┐                                            │
+│       │Guard││Guard││Guard│  ← Guardrails run AFTER each LLM agent     │
+│       │rails││rails││rails│    but BEFORE next node starts             │
+│       └──┬──┘└──┬──┘└──┬──┘                                            │
+│          │      │      │                                                │
+└──────────┼──────┼──────┼────────────────────────────────────────────────┘
+           │      │      │
+           ▼      ▼      ▼
+    ┌─────────────────────────┐
+    │   TruLens Dashboard     │
+    │   ┌───────────────────┐ │
+    │   │ Phase 1: Traces   │ │  ← Latency, tokens, metrics
+    │   ├───────────────────┤ │
+    │   │ Phase 2: Violations│ │  ← Guardrail failures
+    │   └───────────────────┘ │
+    └─────────────────────────┘</div>
+
+<h3>Execution Flow</h3>
+<table>
+    <tr><th>Phase 1 Flow</th><th>Phase 1 + Phase 2 Flow</th></tr>
+    <tr>
+        <td>
+            <code>node_start()</code><br>
+            &nbsp;&nbsp;↓<br>
+            <code>agent_fn()</code><br>
+            &nbsp;&nbsp;↓<br>
+            <code>node_end()</code><br>
+            &nbsp;&nbsp;↓<br>
+            (next node)
+        </td>
+        <td>
+            <code>node_start()</code><br>
+            &nbsp;&nbsp;↓<br>
+            <code>agent_fn()</code><br>
+            &nbsp;&nbsp;↓<br>
+            <code>run_guardrails()</code> ← <span class="highlight">NEW</span><br>
+            &nbsp;&nbsp;↓<br>
+            <code>node_end()</code><br>
+            &nbsp;&nbsp;↓<br>
+            (next node)
+        </td>
+    </tr>
+</table>
+
+<h3>File Structure</h3>
+<div class="file-tree">src/evaluation/trulens_integration/
+├── __init__.py              # Add guardrail exports
+├── config.py                # (unchanged)
+├── wrapper.py               # Add guardrail hook point
+├── openai_patch.py          # (unchanged)
+├── feedback_functions.py    # (unchanged - Phase 1 async metrics)
+├── node_extractors.py       # (unchanged)
+├── cli.py                   # (unchanged)
+├── guardrails.py            # NEW: Pure guardrail check functions
+└── guardrail_runner.py      # NEW: TruLens feedback integration</div>
+
+<h3>Module Responsibilities</h3>
+<table>
+    <tr><th>Module</th><th>Responsibility</th></tr>
+    <tr><td><code>guardrails.py</code></td><td>Pure Python validation logic — no TruLens dependency</td></tr>
+    <tr><td><code>guardrail_runner.py</code></td><td>Wraps guardrails as TruLens Feedback, handles logging</td></tr>
+    <tr><td><code>wrapper.py</code></td><td>Calls <code>guardrail_runner</code> after each LLM node</td></tr>
+</table>
+<p>This separation allows guardrails to be tested independently and reused outside TruLens if needed.</p>
+
+<h2>Soft Enforcement Mechanism</h2>
+
+<h3>Behavior on Failure</h3>
+<p>When a guardrail fails:</p>
+<ol>
+    <li><strong>Log the violation</strong> — Record to TruLens with full context</li>
+    <li><strong>Continue execution</strong> — Pipeline proceeds to next node unchanged</li>
+    <li><strong>No exception raised</strong> — Agent output passes through as-is</li>
+    <li><strong>Dashboard visibility</strong> — Violation appears as low-score feedback entry</li>
+</ol>
+
+<h3>Rationale for Soft Enforcement</h3>
+<table>
+    <tr><th>Hard Enforcement</th><th>Soft Enforcement (chosen)</th></tr>
+    <tr><td>Halts on failure</td><td>Logs and continues</td></tr>
+    <tr><td>Risk of blocking valid edge cases</td><td>Captures data for analysis</td></tr>
+    <tr><td>Requires fallback logic</td><td>Simple to implement</td></tr>
+    <tr><td>Production-critical</td><td>Development/monitoring focus</td></tr>
+</table>
+<p>For a capstone project, soft enforcement provides visibility without the complexity of fallback handling. Can be upgraded to hard enforcement later if needed.</p>
+
+<h3>Violation Record Structure</h3>
+<p>Each violation logged to TruLens:</p>
+<pre><code>{
+    "record_id": "uuid",
+    "app_id": "supply-chain-disrupter",
+    "agent": "l4_risk_classifier",
+    "guardrail": "l4_label_score_alignment",
+    "passed": false,
+    "score": 0.0,
+    "message": "Label CRITICAL does not match score 0.45 (expected HIGH)",
+    "details": {
+        "composite_score": 0.45,
+        "final_label": "CRITICAL",
+        "expected_label": "HIGH"
+    },
+    "timestamp": "2026-07-08T14:32:01Z"
+}</code></pre>
+
+<h3>Dashboard View</h3>
+<p>In TruLens dashboard, violations appear as:</p>
+<ul>
+    <li><strong>Feedback entries</strong> with score <span class="fail">0.0</span> (failed) or <span class="pass">1.0</span> (passed)</li>
+    <li><strong>Filterable</strong> by guardrail name, agent, time range</li>
+    <li><strong>Drillable</strong> to see full violation details and agent context</li>
+</ul>
+
+<h2>Testing &amp; Verification</h2>
+
+<h3>Unit Tests</h3>
+<table>
+    <tr><th>Test</th><th>Verifies</th></tr>
+    <tr><td><code>test_l2_severity_bounds_valid</code></td><td>Accepts 0.0, 0.5, 1.0</td></tr>
+    <tr><td><code>test_l2_severity_bounds_invalid</code></td><td>Rejects -0.1, 1.5, None</td></tr>
+    <tr><td><code>test_l2_category_valid</code></td><td>Accepts all enum values</td></tr>
+    <tr><td><code>test_l2_category_invalid</code></td><td>Rejects "unknown", "", None</td></tr>
+    <tr><td><code>test_l3_geo_risk_bounds</code></td><td>Accepts valid range, rejects out-of-bounds</td></tr>
+    <tr><td><code>test_l4_composite_bounds</code></td><td>Accepts valid range, rejects out-of-bounds</td></tr>
+    <tr><td><code>test_l4_label_score_alignment</code></td><td>Correct tier mapping for all thresholds</td></tr>
+    <tr><td><code>test_l4_ensemble_coherence</code></td><td>Passes with 2/3 agreement, fails with 0/3</td></tr>
+    <tr><td><code>test_l4_citation_required</code></td><td>HIGH/CRITICAL need citations, LOW/MEDIUM don't</td></tr>
+</table>
+
+<h3>Integration Tests</h3>
+<table>
+    <tr><th>Test</th><th>Verifies</th></tr>
+    <tr><td><code>test_guardrails_run_after_node</code></td><td>Guardrails execute between L2→L3, L3→L4</td></tr>
+    <tr><td><code>test_violation_logged_to_trulens</code></td><td>Failed guardrail appears in TruLens DB</td></tr>
+    <tr><td><code>test_pipeline_continues_on_failure</code></td><td>Violation doesn't halt execution</td></tr>
+    <tr><td><code>test_multiple_violations_single_run</code></td><td>All failures captured, not just first</td></tr>
+</table>
+
+<h3>Manual Verification Checklist</h3>
+<ol>
+    <li>Run pipeline with intentionally bad L4 output (mock <code>composite_score = 1.5</code>)</li>
+    <li>Verify violation appears in TruLens dashboard at <code>http://localhost:8502</code></li>
+    <li>Confirm pipeline completed despite violation</li>
+    <li>Check violation record has correct <code>agent</code>, <code>guardrail</code>, <code>message</code>, <code>details</code></li>
+    <li>Run clean scenario — verify all guardrails show score <span class="pass">1.0</span> (passed)</li>
+</ol>
+
+<h3>Test Data Scenarios</h3>
+<table>
+    <tr><th>Scenario</th><th>Expected Violations</th></tr>
+    <tr><td>Taiwan earthquake (normal)</td><td><span class="pass">0</span> — all guardrails pass</td></tr>
+    <tr><td>Synthetic: severity=1.5</td><td><span class="fail">1</span> — <code>l2_severity_bounds</code> fails</td></tr>
+    <tr><td>Synthetic: label mismatch</td><td><span class="fail">1</span> — <code>l4_label_score_alignment</code> fails</td></tr>
+    <tr><td>Synthetic: no citations on CRITICAL</td><td><span class="fail">1</span> — <code>l4_citation_required</code> fails</td></tr>
+    <tr><td>Synthetic: all signals disagree</td><td><span class="fail">1</span> — <code>l4_ensemble_coherence</code> fails</td></tr>
+</table>
+
+<h2>Dependencies</h2>
+<ul>
+    <li>Phase 1 TruLens Observability must be implemented first</li>
+    <li>No additional Python packages required beyond Phase 1</li>
+</ul>
+
+<h2>Future Enhancements (Out of Scope)</h2>
+<ul>
+    <li>Hard enforcement mode (halt on failure)</li>
+    <li>Configurable thresholds per guardrail</li>
+    <li>Automatic retry with prompt modification</li>
+    <li>Guardrails for L5, L6, L7 agents</li>
+    <li>Custom alerting (Slack, email) on violations</li>
+</ul>
+
+</body>
+</html>
