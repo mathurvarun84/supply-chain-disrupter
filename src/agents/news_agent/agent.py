@@ -308,6 +308,10 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
                 response_model=NewsAnalysisLLMOutput,
                 model=MODEL_FAST,
                 max_tokens=1024,
+                run_id=state.run_id,
+                agent_name="L2_news",
+                trace=state.langfuse_trace,
+                span=state.langfuse_span,
             )
             all_signals = _llm_output_to_signals(llm_output)
             llm_used = True

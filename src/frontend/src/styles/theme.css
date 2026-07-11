@@ -1,0 +1,249 @@
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --font-size: 14px;
+  --background: #0B1220;
+  --foreground: #E2E8F0;
+  --card: #121A2B;
+  --card-foreground: #CBD5E1;
+  --popover: #121A2B;
+  --popover-foreground: #E2E8F0;
+  --primary: #3B82F6;
+  --primary-foreground: #ffffff;
+  --secondary: #1E293B;
+  --secondary-foreground: #94A3B8;
+  --muted: #1A2438;
+  --muted-foreground: #64748B;
+  --accent: #2563EB;
+  --accent-foreground: #ffffff;
+  --destructive: #EF4444;
+  --destructive-foreground: #ffffff;
+  --border: #1E293B;
+  --input: #1E293B;
+  --input-background: #121A2B;
+  --switch-background: #334155;
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+  --ring: #3B82F6;
+  --chart-1: #3B82F6;
+  --chart-2: #22C55E;
+  --chart-3: #F59E0B;
+  --chart-4: #F97316;
+  --chart-5: #EF4444;
+  --radius: 0.5rem;
+  --sidebar: #121A2B;
+  --sidebar-foreground: #E2E8F0;
+  --sidebar-primary: #3B82F6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1E293B;
+  --sidebar-accent-foreground: #94A3B8;
+  --sidebar-border: #1E293B;
+  --sidebar-ring: #3B82F6;
+
+  --panel-border2: #243044;
+  --text-muted-strong: #94A3B8;
+  --risk-low: #22C55E;
+  --risk-medium: #F59E0B;
+  --risk-high: #F97316;
+  --risk-critical: #EF4444;
+  --status-idle: #334155;
+  --status-running: #F59E0B;
+  --status-complete: #22C55E;
+  --status-skipped: #818CF8;
+  --status-failed: #EF4444;
+  --radius-panel: 0.875rem;
+  --radius-btn: 0.625rem;
+  --radius-pill: 999px;
+}
+
+.dark {
+  --background: #0B1220;
+  --foreground: #E2E8F0;
+  --card: #121A2B;
+  --card-foreground: #CBD5E1;
+  --popover: #121A2B;
+  --popover-foreground: #E2E8F0;
+  --primary: #3B82F6;
+  --primary-foreground: #ffffff;
+  --secondary: #1E293B;
+  --secondary-foreground: #94A3B8;
+  --muted: #1A2438;
+  --muted-foreground: #64748B;
+  --accent: #2563EB;
+  --accent-foreground: #ffffff;
+  --destructive: #EF4444;
+  --destructive-foreground: #ffffff;
+  --border: #1E293B;
+  --input: #1E293B;
+  --ring: #3B82F6;
+  --font-weight-medium: 500;
+  --font-weight-normal: 400;
+  --chart-1: #3B82F6;
+  --chart-2: #22C55E;
+  --chart-3: #F59E0B;
+  --chart-4: #F97316;
+  --chart-5: #EF4444;
+  --sidebar: #121A2B;
+  --sidebar-foreground: #E2E8F0;
+  --sidebar-primary: #3B82F6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1E293B;
+  --sidebar-accent-foreground: #94A3B8;
+  --sidebar-border: #1E293B;
+  --sidebar-ring: #3B82F6;
+
+  --panel-border2: #243044;
+  --text-muted-strong: #94A3B8;
+  --risk-low: #22C55E;
+  --risk-medium: #F59E0B;
+  --risk-high: #F97316;
+  --risk-critical: #EF4444;
+  --status-idle: #334155;
+  --status-running: #F59E0B;
+  --status-complete: #22C55E;
+  --status-skipped: #818CF8;
+  --status-failed: #EF4444;
+  --radius-panel: 0.875rem;
+  --radius-btn: 0.625rem;
+  --radius-pill: 999px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-input-background: var(--input-background);
+  --color-switch-background: var(--switch-background);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --color-border2: var(--panel-border2);
+  --color-muted-strong: var(--text-muted-strong);
+  --color-risk-low: var(--risk-low);
+  --color-risk-medium: var(--risk-medium);
+  --color-risk-high: var(--risk-high);
+  --color-risk-critical: var(--risk-critical);
+  --color-status-idle: var(--status-idle);
+  --color-status-running: var(--status-running);
+  --color-status-complete: var(--status-complete);
+  --color-status-skipped: var(--status-skipped);
+  --color-status-failed: var(--status-failed);
+  --radius-panel: var(--radius-panel);
+  --radius-btn: var(--radius-btn);
+  --radius-pill: var(--radius-pill);
+
+  /* Motion pass (Screens 1/2/6) — extends design.md §1.5's ping/pulse/
+     fadeInStagger token set. fadeInStagger itself was documented but never
+     wired anywhere pre-pass; it's defined here for the first time. */
+  --animate-slide-in-top: slideInTop 300ms ease-out both;
+  --animate-flash-highlight: flashHighlight 1200ms ease-out both;
+  --animate-fade-stagger: fadeInStagger 300ms ease-out both;
+}
+
+@keyframes slideInTop {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes flashHighlight {
+  0%   { background-color: var(--card); }
+  30%  { background-color: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+  100% { background-color: var(--card); }
+}
+
+@keyframes fadeInStagger {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /**
+  * Default typography styles for HTML elements (h1-h4, p, label, button, input).
+  * These are in @layer base, so Tailwind utility classes (like text-sm, text-lg) automatically override them.
+  */
+
+  html {
+    font-size: var(--font-size);
+  }
+
+  h1 {
+    font-size: var(--text-2xl);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  h2 {
+    font-size: var(--text-xl);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  h3 {
+    font-size: var(--text-lg);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  h4 {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  label {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  button {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+  }
+
+  input {
+    font-size: var(--text-base);
+    font-weight: var(--font-weight-normal);
+    line-height: 1.5;
+  }
+}

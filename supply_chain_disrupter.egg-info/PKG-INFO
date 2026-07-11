@@ -2,3 +2,18 @@ Metadata-Version: 2.4
 Name: supply-chain-disrupter
 Version: 0.1.0
 Requires-Python: >=3.10
+Requires-Dist: chromadb<2,>=1.5
+Requires-Dist: feedparser<7,>=6
+Requires-Dist: openpyxl<4,>=3.1
+Requires-Dist: pandas<4,>=2.2
+Requires-Dist: prophet<2,>=1.1
+Requires-Dist: pydantic<3,>=2.7
+Requires-Dist: pypdf<7,>=6
+Requires-Dist: python-docx<2,>=1.2
+Requires-Dist: pyyaml<7,>=6
+Requires-Dist: requests<3,>=2.31
+Requires-Dist: sentence-transformers<6,>=5
+Requires-Dist: streamlit<2,>=1.40
+Requires-Dist: langgraph<2,>=1.2
+Provides-Extra: dev
+Requires-Dist: pytest<10,>=8; extra == "dev"

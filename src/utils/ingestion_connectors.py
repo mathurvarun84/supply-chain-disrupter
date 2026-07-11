@@ -12,6 +12,7 @@ Connectors never raise outside _run_connector() — all exceptions are caught th
 import importlib.util
 import json
 import logging
+import os
 import re
 import time
 from abc import ABC, abstractmethod
@@ -35,6 +36,39 @@ _YFINANCE_AVAILABLE = importlib.util.find_spec("yfinance") is not None
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ssl_verify() -> bool:
+    """TLS verification stays ON unless explicitly disabled via INGEST_INSECURE_SSL.
+
+    Some corporate networks intercept TLS with their own (or non-compliant) certs,
+    which breaks feedparser/requests calls to Google News, Reuters and the
+    Federal Register APIs alike. Mirrors src/agents/data_ingestion/live_ingest.py.
+    """
+    if os.getenv("INGEST_INSECURE_SSL", "").lower() in {"1", "true", "yes"}:
+        try:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+        return False
+    return True
+
+
+def _fetch_rss_bytes(url: str, timeout: int = 15) -> Optional[bytes]:
+    """Fetch RSS/Atom content via requests (respecting INGEST_INSECURE_SSL).
+
+    feedparser.parse(url) uses urllib directly and ignores our SSL/env
+    configuration, so on networks with TLS interception it fails silently
+    with a swallowed SSLError, making ingestion look like it succeeded with
+    zero results. Fetching bytes ourselves lets us control verification.
+    """
+    resp = requests.get(url, timeout=timeout, verify=_ssl_verify(), headers={
+        "User-Agent": "Mozilla/5.0 (compatible; SupplyChainDisrupter/1.0)"
+    })
+    resp.raise_for_status()
+    return resp.content
 
 
 # ── Global semiconductor hub cities (ref-spec: source-of-disruption monitoring) ──
@@ -686,7 +720,7 @@ class GoogleNewsRSSConnector(BaseConnector):
         for term in self._SEARCH_TERMS + city_terms:
             try:
                 url = f"https://news.google.com/rss/search?q={term}&hl=en-US&gl=US&ceid=US:en"
-                feed = feedparser.parse(url)
+                feed = feedparser.parse(_fetch_rss_bytes(url))
                 for entry in feed.entries[:10]:
                     results.append({
                         "_target": "news_disruptions",
@@ -712,11 +746,11 @@ class GoogleNewsRSSConnector(BaseConnector):
             term = meta["query"].replace(" ", "+")
             try:
                 url = f"https://news.google.com/rss/search?q={term}&hl=en-US&gl=US&ceid=US:en"
-                feed = feedparser.parse(url)
+                feed = feedparser.parse(_fetch_rss_bytes(url))
                 entries = feed.entries[:10]
                 # Reuters RSS fallback when Google News returns < 3 results
                 if len(entries) < 3:
-                    backup = feedparser.parse("https://feeds.reuters.com/reuters/technologyNews")
+                    backup = feedparser.parse(_fetch_rss_bytes("https://feeds.reuters.com/reuters/technologyNews"))
                     entries = list(entries) + [
                         e for e in backup.entries
                         if any(kw in (e.get("title", "") + e.get("summary", "")).lower()
@@ -940,7 +974,7 @@ class ReutersRSSConnector(BaseConnector):
         results = []
         for feed_url in self._RSS_FEEDS:
             try:
-                feed = feedparser.parse(feed_url)
+                feed = feedparser.parse(_fetch_rss_bytes(feed_url))
                 for entry in feed.entries:
                     title = entry.get("title", "").lower()
                     summary = entry.get("summary", "").lower()
