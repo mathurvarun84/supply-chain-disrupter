@@ -28,6 +28,9 @@ fine_tuning/models/
 # Generated SQLite (rebuilt from Excel via etl_loader)
 data/*.db
 
+# TruLens session storage (data/trulens/trulens.db)
+data/trulens/
+
 # Local test run output
 test_master_v3_output.txt
 
