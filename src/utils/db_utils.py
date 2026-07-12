@@ -208,7 +208,13 @@ def fetch_latest_llm_call_log(run_id: str, agent_name: str) -> Optional[Dict[str
 
 def fetch_recent_composite_scores(days: int) -> List[float]:
     """Return composite_score values from risk_classifications in the last `days` days."""
-    ensure_schema()
+    # ensure_schema() does NOT create risk_classifications — that table is
+    # created separately by ensure_risk_classification_table(), normally
+    # invoked lazily inside insert_risk_classification(). On a freshly
+    # built database where no classification has ever been written yet,
+    # calling ensure_schema() here left the table missing and this query
+    # crashed with "no such table: risk_classifications" (PR review).
+    ensure_risk_classification_table()
     rows = execute_query(
         """
         SELECT composite_score FROM risk_classifications
