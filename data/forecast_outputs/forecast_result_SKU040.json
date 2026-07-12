@@ -1,0 +1,53 @@
+{
+  "sku_id": "SKU040",
+  "regressors_used": [
+    "Disruption_Flag"
+  ],
+  "regressor_selection_method": "backtest_ablation",
+  "prophet_forecast": [
+    {
+      "week_start": "2026-07-13",
+      "demand_baseline": 73.64,
+      "demand_disrupted": 70.38
+    },
+    {
+      "week_start": "2026-07-20",
+      "demand_baseline": 76.16,
+      "demand_disrupted": 73.15
+    },
+    {
+      "week_start": "2026-07-27",
+      "demand_baseline": 76.97,
+      "demand_disrupted": 74.33
+    },
+    {
+      "week_start": "2026-08-03",
+      "demand_baseline": 76.3,
+      "demand_disrupted": 73.99
+    },
+    {
+      "week_start": "2026-08-10",
+      "demand_baseline": 75.58,
+      "demand_disrupted": 73.25
+    }
+  ],
+  "expected_drop_pct": 3.58,
+  "stockout_prob": 0.585,
+  "mape_prophet_trend_only": 27.49,
+  "mape_prophet_selected": 26.91,
+  "mape_dataset_baseline_avg": 21.36,
+  "mape_dataset_ai_avg": 7.57,
+  "mape_improvement_pct_vs_dataset_baseline": 64.57,
+  "disruption_scenario": {
+    "disruption_flag": 1,
+    "risk_score_composite": 0.53,
+    "calm_period_risk_score_composite": 0.507
+  },
+  "agent_logs": [
+    "L5 DemandForecastingAgent started for SKU040 (Electronics scope, weekly, 5-week horizon)",
+    "Regressor backtest scores: {'trend_only': 27.49, 'disruption_only': 26.91, 'risk_only': 27.55, 'disruption_risk': 26.92, 'chip_growth_only': 31.47, 'all_four': 30.83}",
+    "Selected regressors: ['Disruption_Flag']",
+    "Expected 5-week demand deviation (disrupted vs baseline): 3.58%",
+    "Stockout probability under disruption scenario: 0.585"
+  ]
+}

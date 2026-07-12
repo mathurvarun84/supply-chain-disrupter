@@ -1,4 +1,3 @@
-import importlib.util
 import logging
 import uuid
 from typing import Any, Callable, Dict
@@ -6,20 +5,15 @@ from typing import Any, Callable, Dict
 from langgraph.graph import END, START, StateGraph
 
 from src.agents.data_ingestion.agent import data_ingestion_agent
+from src.agents.forecast.agent import demand_forecasting_agent
 from src.agents.mitigation_agent import mitigation_recommendation_agent
 from src.agents.news_agent.agent import news_event_analysis_agent
 from src.agents.risk_classifier_agent.agent import risk_classifier_agent
 from src.agents.simulation_agent import simulation_agent
 from src.agents.state import ForecastResult, GlobalState
 from src.agents.weather_agent.agent import weather_risk_monitoring_agent
-from src.utils.db_utils import fetch_time_series
 
 logger = logging.getLogger(__name__)
-
-# Optional heavy dependencies. Agents that need these degrade gracefully when absent.
-_PROPHET_AVAILABLE = importlib.util.find_spec("prophet") is not None
-_PANDAS_AVAILABLE = importlib.util.find_spec("pandas") is not None
-
 
 # Bootstrap ingestion schema once per process (additive, never modifies lite_master).
 try:
@@ -31,48 +25,6 @@ try:
 except Exception as _ingestion_bootstrap_exc:
     logger.warning("Ingestion schema bootstrap failed: %s", _ingestion_bootstrap_exc)
     _INGESTION_V2_AVAILABLE = False
-
-
-def demand_forecasting_agent(state: GlobalState) -> Dict[str, Any]:
-    """L5 - Prophet demand forecast (optional; skipped if prophet/pandas absent)."""
-    if not _PROPHET_AVAILABLE or not _PANDAS_AVAILABLE:
-        logger.warning("L5: prophet/pandas not installed; demand forecasting skipped.")
-        return {
-            "agent_logs": state.agent_logs + [
-                "L5: SKIPPED - prophet or pandas not installed. Run: pip install prophet pandas"
-            ],
-        }
-
-    if state.active_record is None:
-        raise ValueError("Active record is required for demand forecasting.")
-
-    ts = fetch_time_series(state.active_record["port"], state.active_record["sku"])
-    if len(ts) < 10:
-        return {
-            "agent_logs": state.agent_logs + [
-                f"L5: SKIPPED - only {len(ts)} history points available (need >= 10)."
-            ],
-        }
-
-    import pandas as pd
-    from prophet import Prophet
-
-    df_records = [{"ds": row["event_date"], "y": row["demand"]} for row in ts]
-    df = pd.DataFrame(df_records)
-    model = Prophet()
-    model.fit(df)
-    future = model.make_future_dataframe(periods=30)
-    forecast = model.predict(future)
-    forecast_points = forecast[["ds", "yhat"]].tail(30).to_dict(orient="records")
-    demand_baseline = float(state.active_record.get("demand", 0.0))
-    expected_drop = max(0.0, 1.0 - (forecast_points[-1]["yhat"] / (demand_baseline or 1.0)))
-    return {
-        "forecast_result": ForecastResult(
-            prophet_forecast=forecast_points,
-            expected_drop_pct=round(expected_drop * 100.0, 2),
-        ),
-        "agent_logs": state.agent_logs + ["L5: Demand forecasting completed."],
-    }
 
 
 def _merge_state(state: GlobalState, delta: Dict[str, Any]) -> GlobalState:

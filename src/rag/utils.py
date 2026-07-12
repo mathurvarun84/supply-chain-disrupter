@@ -251,57 +251,61 @@ def _workbook_documents(
         "semiconductor_events": 0,
     }
 
-    guide = sheets["Column Guide (Lite)"].dropna(how="all")
-    for row_index, row in enumerate(guide.to_dict(orient="records")):
-        column = row.get("Column")
-        agent = row.get("Agent")
-        source_type = row.get("Source Type")
-        purpose = row.get("Purpose")
+    guide = sheets.get("Column Guide (Lite)")
+    if guide is not None:
+        guide = guide.dropna(how="all")
+        for row_index, row in enumerate(guide.to_dict(orient="records")):
+            column = row.get("Column")
+            agent = row.get("Agent")
+            source_type = row.get("Source Type")
+            purpose = row.get("Purpose")
 
-        # v3.1 appendix rows (Known_Disruption_Event, Known_Severity) use Unnamed cols
-        if pd.isna(column) or str(column).strip().lower() in ("", "nan", "none"):
-            column = row.get("Unnamed: 5")
-            if pd.isna(agent) or str(agent).strip().lower() in ("", "nan", "none"):
-                agent = row.get("Unnamed: 4")
-            if pd.isna(source_type) or str(source_type).strip().lower() in ("", "nan", "none"):
-                source_type = row.get("Unnamed: 6")
-            if pd.isna(purpose) or str(purpose).strip().lower() in ("", "nan", "none"):
-                purpose = row.get("Unnamed: 7")
+            # v3.1 appendix rows (Known_Disruption_Event, Known_Severity) use Unnamed cols
+            if pd.isna(column) or str(column).strip().lower() in ("", "nan", "none"):
+                column = row.get("Unnamed: 5")
+                if pd.isna(agent) or str(agent).strip().lower() in ("", "nan", "none"):
+                    agent = row.get("Unnamed: 4")
+                if pd.isna(source_type) or str(source_type).strip().lower() in ("", "nan", "none"):
+                    source_type = row.get("Unnamed: 6")
+                if pd.isna(purpose) or str(purpose).strip().lower() in ("", "nan", "none"):
+                    purpose = row.get("Unnamed: 7")
 
-        if pd.isna(column) or str(column).strip().lower() in ("", "nan", "none"):
-            continue
+            if pd.isna(column) or str(column).strip().lower() in ("", "nan", "none"):
+                continue
 
-        text = (
-            f"Agent: {agent}\n"
-            f"Field: {column}\n"
-            f"Source type: {source_type}\n"
-            f"Purpose: {purpose}"
-        )
-        _add_document(
-            documents,
-            metadatas,
-            ids,
-            text=text,
-            source=excel_path.name,
-            doc_type="data_dictionary",
-            key=f"{row_index}|{column}",
-            metadata={"agent": str(agent), "field": str(column)},
-        )
-        counts["data_dictionary"] += 1
+            text = (
+                f"Agent: {agent}\n"
+                f"Field: {column}\n"
+                f"Source type: {source_type}\n"
+                f"Purpose: {purpose}"
+            )
+            _add_document(
+                documents,
+                metadatas,
+                ids,
+                text=text,
+                source=excel_path.name,
+                doc_type="data_dictionary",
+                key=f"{row_index}|{column}",
+                metadata={"agent": str(agent), "field": str(column)},
+            )
+            counts["data_dictionary"] += 1
 
-    legend = sheets["Legend"].dropna(how="all")
-    for index, row in legend.iterrows():
-        text = f"{row.iloc[0]}: {row.iloc[1]}"
-        _add_document(
-            documents,
-            metadatas,
-            ids,
-            text=text,
-            source=excel_path.name,
-            doc_type="workbook_context",
-            key=str(index),
-        )
-        counts["workbook_context"] += 1
+    legend = sheets.get("Legend")
+    if legend is not None:
+        legend = legend.dropna(how="all")
+        for index, row in legend.iterrows():
+            text = f"{row.iloc[0]}: {row.iloc[1]}"
+            _add_document(
+                documents,
+                metadatas,
+                ids,
+                text=text,
+                source=excel_path.name,
+                doc_type="workbook_context",
+                key=str(index),
+            )
+            counts["workbook_context"] += 1
 
     master = sheets["Lite Master"]
     grouped = master.groupby("Disruption_Event_Label", dropna=False)
@@ -372,47 +376,49 @@ def _workbook_documents(
         )
         counts["mitigation_guidance"] += 1
 
-    signals = sheets["Semiconductor Signals"].dropna(how="all")
-    event_rows = signals[
-        signals["Known Disruption Event"].notna()
-        & ~signals["Known Disruption Event"].astype(str).isin(["—", "-", "None"])
-    ]
-    event_rows = event_rows.drop_duplicates(
-        subset=["Year", "Country", "Company", "Known Disruption Event"]
-    )
-    for _, row in event_rows.iterrows():
-        event = str(row["Known Disruption Event"])
-        text = (
-            f"Historical semiconductor disruption signal\n"
-            f"Year: {row['Year']}\nCountry: {row['Country']}\n"
-            f"Company: {row['Company']}\nEvent: {event}\n"
-            f"Known severity: {row['Known Severity']}\n"
-            f"Supply disruption index: {row['Supply Disruption Index']}\n"
-            f"Semiconductor security risk: "
-            f"{row['Semiconductor Security Risk']}\n"
-            f"Natural disaster risk: {row['Natural Disaster Risk']}\n"
-            f"Factory shutdown risk: {row['Factory Shutdown Risk']}\n"
-            f"Export control level: {row['Export Control Level']}\n"
-            f"Chip price index: {row['Chip Price Index']}"
+    signals = sheets.get("Semiconductor Signals")
+    if signals is not None:
+        signals = signals.dropna(how="all")
+        event_rows = signals[
+            signals["Known Disruption Event"].notna()
+            & ~signals["Known Disruption Event"].astype(str).isin(["—", "-", "None"])
+        ]
+        event_rows = event_rows.drop_duplicates(
+            subset=["Year", "Country", "Company", "Known Disruption Event"]
         )
-        key = f"{row['Year']}|{row['Country']}|{row['Company']}|{event}"
-        _add_document(
-            documents,
-            metadatas,
-            ids,
-            text=text,
-            source=excel_path.name,
-            doc_type="semiconductor_event",
-            key=key,
-            metadata={
-                "year": int(row["Year"]),
-                "country": str(row["Country"]),
-                "company": str(row["Company"]),
-                "event": event,
-                "severity": str(row["Known Severity"]),
-            },
-        )
-        counts["semiconductor_events"] += 1
+        for _, row in event_rows.iterrows():
+            event = str(row["Known Disruption Event"])
+            text = (
+                f"Historical semiconductor disruption signal\n"
+                f"Year: {row['Year']}\nCountry: {row['Country']}\n"
+                f"Company: {row['Company']}\nEvent: {event}\n"
+                f"Known severity: {row['Known Severity']}\n"
+                f"Supply disruption index: {row['Supply Disruption Index']}\n"
+                f"Semiconductor security risk: "
+                f"{row['Semiconductor Security Risk']}\n"
+                f"Natural disaster risk: {row['Natural Disaster Risk']}\n"
+                f"Factory shutdown risk: {row['Factory Shutdown Risk']}\n"
+                f"Export control level: {row['Export Control Level']}\n"
+                f"Chip price index: {row['Chip Price Index']}"
+            )
+            key = f"{row['Year']}|{row['Country']}|{row['Company']}|{event}"
+            _add_document(
+                documents,
+                metadatas,
+                ids,
+                text=text,
+                source=excel_path.name,
+                doc_type="semiconductor_event",
+                key=key,
+                metadata={
+                    "year": int(row["Year"]),
+                    "country": str(row["Country"]),
+                    "company": str(row["Company"]),
+                    "event": event,
+                    "severity": str(row["Known Severity"]),
+                },
+            )
+            counts["semiconductor_events"] += 1
 
     return documents, metadatas, ids, counts
 
