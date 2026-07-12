@@ -1,24 +1,37 @@
 /**
  * Screen 1 (Live Feed) — "Running Documentary" agent log stream.
- * Real data source: GET /api/live-feed/logs. Only the L1 line in this
- * component's data is real (from ingestion_run_log); the L2-L7 lines are
- * the unmodified Day-1 fixture data (source="stub") and will become real on
- * Day 9 — do not edit the L2-L7 fixture values from this component. Stub
- * lines render dimmed with a "stub" caption so the scope cut stays visible
- * to an evaluator rather than being hidden.
+ * Real data source: GET /api/live-feed/logs?run_id=. L2-L7 lines are real
+ * once a run_id is active (fetch_run_logs() reads agent_execution_log);
+ * without an active run_id the endpoint falls back to Day-1 fixture stub
+ * lines (source="stub"), rendered dimmed with a "stub" caption so the
+ * fallback stays visible to an evaluator rather than being hidden. When a
+ * run_id IS active but agent_execution_log has no rows for it yet (L1's
+ * pre-flight ingestion sweep, or the first second before L1 writes its
+ * first row), the same stub fallback fires — a "pipeline running, waiting
+ * for data…" banner distinguishes that from "no run has ever started" so
+ * it doesn't read as broken.
  */
 import { useRef, useEffect } from "react";
+import { RefreshCw } from "lucide-react";
 import { useLiveFeedLogs } from "../../hooks/useLiveFeed";
 import { prefersReducedMotion } from "../../utils/animation";
 
-export function AgentLogPanel({ onTabSwitch }: { onTabSwitch: (t: number) => void }) {
+export function AgentLogPanel({
+  runId,
+  onTabSwitch,
+}: {
+  runId?: string;
+  onTabSwitch: (t: number) => void;
+}) {
   const logRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // Log lines only ever append (see header comment) — anything past the
   // previously-seen length is a genuinely new line, not a background
   // refetch echoing the same data.
   const seenCount = useRef(0);
-  const { data, isLoading, isError } = useLiveFeedLogs();
+  const { data, isLoading, isError } = useLiveFeedLogs(runId);
+
+  const waitingForRun = Boolean(runId) && data?.lines.every((l) => l.source === "stub");
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
@@ -49,6 +62,12 @@ export function AgentLogPanel({ onTabSwitch }: { onTabSwitch: (t: number) => voi
         )}
         {isError && (
           <div className="text-risk-critical px-1">Could not load agent log.</div>
+        )}
+        {waitingForRun && (
+          <div className="flex items-center gap-1.5 px-1 py-1 mb-1 text-status-running">
+            <RefreshCw size={10} className="animate-spin shrink-0" />
+            Pipeline run {runId?.slice(0, 8)}… is running — waiting for L1-L7 data (polling every 2s).
+          </div>
         )}
         {data?.lines.map((line, i) => (
           <div

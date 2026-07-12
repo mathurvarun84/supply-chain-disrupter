@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -73,7 +74,7 @@ def read_excel_sheets(excel_path: Path = EXCEL_SOURCE) -> Dict[str, pd.DataFrame
     if missing:
         raise ValueError(f"Missing expected workbook sheets: {sorted(missing)}")
 
-    return {
+    sheets = {
         "Lite Master": pd.read_excel(excel_path, sheet_name="Lite Master", header=1),
         "Column Guide (Lite)": pd.read_excel(
             excel_path, sheet_name="Column Guide (Lite)", header=2
@@ -86,6 +87,14 @@ def read_excel_sheets(excel_path: Path = EXCEL_SOURCE) -> Dict[str, pd.DataFrame
             excel_path, sheet_name="Semiconductor Signals", header=1
         ),
     }
+
+    # SKU_Product_Mapping is NOT in EXPECTED_SHEETS -- older workbooks that
+    # predate the sku_id crosswalk work must still load without it.
+    if "SKU_Product_Mapping" in workbook.sheet_names:
+        sheets["SKU_Product_Mapping"] = pd.read_excel(
+            excel_path, sheet_name="SKU_Product_Mapping", header=1
+        )
+    return sheets
 
 
 def _clean_scalar(value: Any) -> Any:
@@ -206,7 +215,21 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             alternate_supplier_available INTEGER,
             mitigation_recommendation TEXT,
             known_disruption_event TEXT,
-            known_severity TEXT
+            known_severity TEXT,
+            sku_id TEXT  -- SKU_Product_Mapping crosswalk key; NULL on workbooks predating it
+        );
+
+        CREATE TABLE sku_product_mapping (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku_id TEXT,
+            category_name TEXT,
+            product_name TEXT,
+            product_order_count INTEGER,
+            order_date_min TEXT,
+            order_date_max TEXT,
+            sku_family_total_order_count INTEGER,
+            forced_non_overlap INTEGER,   -- 0/1, flags the one documented exception
+            source TEXT DEFAULT 'SYNTHESIZED'
         );
 
         CREATE TABLE ops_kpi (
@@ -330,7 +353,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             supply_disruption_index,
             natural_disaster_risk,
             export_control_level,
-            order_region
+            order_region,
+            sku_id
         FROM lite_master;
 
         CREATE INDEX idx_lite_master_date ON lite_master(order_date);
@@ -338,6 +362,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_lite_master_region ON lite_master(order_region);
         CREATE INDEX idx_lite_master_product ON lite_master(product_name);
         CREATE INDEX idx_lite_master_label ON lite_master(disruption_event_label);
+        CREATE INDEX idx_lite_master_sku_id ON lite_master(sku_id);
+        CREATE INDEX idx_lite_master_region_date ON lite_master(order_region, order_date);
         CREATE INDEX idx_ops_kpi_week_sku ON ops_kpi(week_start, sku_id);
         CREATE INDEX idx_semiconductor_year_company
             ON semiconductor_signals(year, company);
@@ -395,6 +421,7 @@ def load_excel_into_sqlite(
             "Mitigation_Recommendation",
             "Known_Disruption_Event",   # v3: macro event name from Semi Signals join
             "Known_Severity",           # v3: macro event severity (CRITICAL/HIGH/—)
+            "SKU_ID",                   # SKU_Product_Mapping crosswalk key
         ]
         master_target = [
             "order_date", "order_id", "order_region", "category_name", "year",
@@ -410,6 +437,7 @@ def load_excel_into_sqlite(
             "mitigation_recommendation",
             "known_disruption_event",   # v3: macro event name
             "known_severity",           # v3: macro event severity
+            "sku_id",                   # SKU_Product_Mapping crosswalk key
         ]
         _insert_frame(
             conn, "lite_master", sheets["Lite Master"], master_source, master_target
@@ -474,6 +502,26 @@ def load_excel_into_sqlite(
             ["item", "description"],
         )
 
+        # Audit copy of the SKU_Product_Mapping crosswalk sheet, only when
+        # the source workbook carries it (older workbooks are unaffected).
+        if "SKU_Product_Mapping" in sheets:
+            mapping = sheets["SKU_Product_Mapping"].dropna(how="all")
+            _insert_frame(
+                conn,
+                "sku_product_mapping",
+                mapping,
+                [
+                    "SKU_ID", "Category_Name", "Product_Name",
+                    "Product_Order_Count", "Order_Date_Min", "Order_Date_Max",
+                    "SKU_Family_Total_Order_Count", "Forced_Non_Overlap", "Source",
+                ],
+                [
+                    "sku_id", "category_name", "product_name",
+                    "product_order_count", "order_date_min", "order_date_max",
+                    "sku_family_total_order_count", "forced_non_overlap", "source",
+                ],
+            )
+
         metadata = {
             "source_file": str(excel_path.resolve()),
             "source_sha256": _sha256(excel_path),
@@ -513,9 +561,7 @@ def load_excel_into_sqlite(
     else:
         conn.close()
 
-    if db_path.exists():
-        db_path.unlink()
-    os.replace(temp_path, db_path)
+    replace_database_file(temp_path, db_path)
     return len(sheets["Lite Master"])
 
 
@@ -527,6 +573,46 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _is_file_lock_error(exc: OSError) -> bool:
+    return (
+        isinstance(exc, PermissionError)
+        and getattr(exc, "winerror", None) == 32
+    ) or "WinError 32" in str(exc) or "being used by another process" in str(exc)
+
+
+def replace_database_file(source_path: Path, target_path: Path, retries: int = 8, delay_seconds: float = 0.5) -> None:
+    """Atomically replace the target database, retrying briefly on Windows file locks."""
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source database not found: {source_path}")
+
+    for attempt in range(retries):
+        try:
+            if target_path.exists():
+                target_path.unlink()
+            os.replace(source_path, target_path)
+            return
+        except FileNotFoundError:
+            if source_path.exists():
+                continue
+            raise
+        except PermissionError as exc:
+            if attempt < retries - 1 and _is_file_lock_error(exc):
+                time.sleep(delay_seconds * (attempt + 1))
+                continue
+            raise RuntimeError(
+                f"Unable to replace database file {target_path} after {retries} attempts: {exc}"
+            ) from exc
+        except OSError as exc:
+            if attempt < retries - 1 and _is_file_lock_error(exc):
+                time.sleep(delay_seconds * (attempt + 1))
+                continue
+            raise RuntimeError(
+                f"Unable to replace database file {target_path} after {retries} attempts: {exc}"
+            ) from exc
+
+    raise RuntimeError(f"Unable to replace database file {target_path} after {retries} attempts")
 
 
 def get_sqlite_stats(db_path: Path = DB_PATH) -> Dict[str, Any]:

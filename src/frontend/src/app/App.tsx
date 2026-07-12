@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Activity, BarChart2, Shield, Eye, Database, Settings, Play,
-  Copy, Clock, Server, Map,
+  Copy, Clock, Server, Map, RefreshCw, Wrench,
 } from "lucide-react";
 import { AgentNode } from "./components/AgentNode";
 import { TabPlaceholder } from "./components/TabPlaceholder";
@@ -9,7 +10,9 @@ import { TabLiveFeed } from "./TabLiveFeed";
 import { TabRiskClassification } from "./TabRiskClassification";
 import { TabRagEval } from "./TabRagEval";
 import { TabObservability } from "./TabObservability";
+import { TabAdmin } from "./TabAdmin";
 import { usePipelineStatus } from "./hooks/usePipelineStatus";
+import { DemoScenarioInjector } from "./components/pipeline/DemoScenarioInjector";
 
 const TABS = [
   { icon: Activity, label: "Live Feed", day: 2 },
@@ -18,11 +21,33 @@ const TABS = [
   { icon: Map, label: "Mitigation Plan", day: 5 },
   { icon: Eye, label: "Observability", day: 6 },
   { icon: Database, label: "RAG / RAGAS", day: 7 },
+  { icon: Wrench, label: "Admin", day: 9 },
 ];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState(0);
-  const { data: pipeline } = usePipelineStatus();
+  const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
+  const [showRunModal, setShowRunModal] = useState(false);
+  const { data: pipeline } = usePipelineStatus(activeRunId);
+  const pipelineRunning = Boolean(pipeline && !pipeline.is_complete && activeRunId);
+
+  // Screen 2 (Risk Classification) fetches once with staleTime: Infinity —
+  // it has no other signal that a new run finished, so it would otherwise
+  // keep showing whatever it first loaded for the browser session. Refetch
+  // it (and the other per-run result tabs) the moment the active run completes.
+  const qc = useQueryClient();
+  const invalidatedRunRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (pipeline?.is_complete && activeRunId && invalidatedRunRef.current !== activeRunId) {
+      invalidatedRunRef.current = activeRunId;
+      qc.invalidateQueries({ queryKey: ["risk-classification"] });
+    }
+  }, [pipeline?.is_complete, activeRunId, qc]);
+  // "What's going on right now" text: the live-fetch phase (before L1
+  // starts) reports current_phase; once agent_execution_log rows exist,
+  // show whichever agent is currently Running instead.
+  const runningAgent = pipeline?.agents.find((a) => a.status === "Running");
+  const statusText = pipeline?.current_phase ?? (runningAgent ? `Running ${runningAgent.name}…` : null);
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background text-foreground" style={{ fontFamily: "'Inter', sans-serif" }}>
@@ -40,18 +65,30 @@ export default function App() {
         </div>
 
         {/* Pipeline Strip */}
-        <div className="flex items-center gap-1 flex-1 justify-center min-w-0">
-          {(pipeline?.agents ?? []).map((agent, i, arr) => (
-            <div key={agent.id} className="flex items-center gap-1">
-              <AgentNode id={agent.id} name={agent.name} status={agent.status} compact />
-              {i < arr.length - 1 && <div className="w-4 h-px bg-border" />}
+        <div className="flex flex-col items-center gap-0.5 flex-1 justify-center min-w-0">
+          <div className="flex items-center gap-1">
+            {(pipeline?.agents ?? []).map((agent, i, arr) => (
+              <div key={agent.id} className="flex items-center gap-1">
+                <AgentNode id={agent.id} name={agent.name} status={agent.status} duration_ms={agent.duration_ms} compact />
+                {i < arr.length - 1 && <div className="w-4 h-px bg-border" />}
+              </div>
+            ))}
+          </div>
+          {statusText && (
+            <div className="flex items-center gap-1 text-[9px] font-mono text-status-running">
+              <RefreshCw size={8} className="animate-spin" />
+              {statusText}
             </div>
-          ))}
+          )}
         </div>
 
         {/* Right Controls */}
         <div className="flex items-center gap-3 shrink-0">
-          <div className="flex items-center gap-1 cursor-pointer group" title="Click to copy run_id">
+          <div
+            className="flex items-center gap-1 cursor-pointer group"
+            title="Click to copy run_id"
+            onClick={() => pipeline?.run_id && navigator.clipboard.writeText(pipeline.run_id)}
+          >
             <span className="text-[9px] font-mono text-muted-foreground">run_id</span>
             <span className="text-[9px] font-mono text-muted-strong group-hover:text-foreground transition-colors">
               {pipeline?.run_id ?? "—"}
@@ -73,15 +110,22 @@ export default function App() {
           </div>
 
           <button
-            disabled
-            title="Wired on Day 9"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs font-semibold text-white opacity-50 cursor-not-allowed bg-secondary border border-primary/20"
+            onClick={() => setShowRunModal(true)}
+            disabled={pipelineRunning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs font-semibold text-white transition-opacity disabled:opacity-50 disabled:cursor-not-allowed bg-secondary border border-primary/20"
           >
-            <Play size={11} fill="white" />
-            Run Pipeline
+            {pipelineRunning ? <RefreshCw size={11} className="animate-spin" /> : <Play size={11} fill="white" />}
+            {pipelineRunning ? "Running…" : "Run Pipeline"}
           </button>
         </div>
       </div>
+
+      {showRunModal && (
+        <DemoScenarioInjector
+          onClose={() => setShowRunModal(false)}
+          onRunStarted={setActiveRunId}
+        />
+      )}
 
       {/* Main Layout */}
       <div className="flex flex-1 overflow-hidden">
@@ -127,13 +171,15 @@ export default function App() {
           {/* Tab Body */}
           <div className="flex-1 overflow-hidden bg-background">
             {activeTab === 0 ? (
-              <TabLiveFeed onTabSwitch={setActiveTab} />
+              <TabLiveFeed runId={activeRunId ?? pipeline?.run_id} onTabSwitch={setActiveTab} />
             ) : activeTab === 1 ? (
               <TabRiskClassification />
             ) : activeTab === 4 ? (
               <TabObservability />
             ) : activeTab === 5 ? (
               <TabRagEval />
+            ) : activeTab === 6 ? (
+              <TabAdmin />
             ) : (
               <TabPlaceholder title={TABS[activeTab].label} day={TABS[activeTab].day} />
             )}

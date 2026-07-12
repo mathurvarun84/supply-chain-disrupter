@@ -32,6 +32,7 @@ from src.agents.risk_classifier_agent import (
     _escalate_label,
     _max_duration_days,
     _norm,
+    select_forecast_sku,
 )
 
 
@@ -514,6 +515,198 @@ class TestNorm:
 
     def test_equal_bounds_returns_zero(self):
         assert _norm(5.0, 5.0, 5.0) == 0.0
+
+
+# ── select_forecast_sku() / ForecastHandoff (sku_id threading, v2) ────────────
+
+def _replay_candidate(order_id, sku_id, label, composite, **overrides):
+    """Minimal REPLAY-shaped candidate record (stored composite + label)."""
+    rec = {
+        "order_id": order_id,
+        "sku_id": sku_id,
+        "disruption_event_label": label,
+        "risk_score_composite": composite,
+        "delivery_status": "Late delivery",
+        "product_name": f"Product-{sku_id}",
+        "category_name": "Cameras",
+        "order_date": "2024-01-15",
+        "unit_price_usd": 100.0,
+        "sales_usd": 200.0,
+        "port": "Eastern Asia",
+        "sku": f"Product-{sku_id}",
+        "order_region": "Eastern Asia",
+        "year": 2024,
+        "export_control_level": 3.0,
+        "natural_disaster_risk": 5.0,
+        "supply_disruption_index": 7.0,
+        "defect_rate_pct": 10.0,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def make_state_multi(candidates: list) -> GlobalState:
+    """GlobalState with multiple candidate_records for one event."""
+    return GlobalState(
+        event_metadata=EventMetadata(
+            disruption_type="earthquake",
+            affected_port="Hsinchu",
+            affected_route="Hsinchu to Singapore",
+            severity=0.8,
+            shock_duration_days=0,
+            recovery_window_days=60,
+            synthetic_ratio=0.0,
+        ),
+        active_record=candidates[0],
+        candidate_records=candidates,
+        news_signals=[],
+        live_weather_severity=0.5,
+    )
+
+
+_ENSEMBLE_PATCH_TARGETS = [
+    "src.agents.risk_classifier_agent.agent.ensure_risk_classification_table",
+    "src.agents.risk_classifier_agent.agent.insert_risk_classification",
+    "src.agents.risk_classifier_agent.agent.update_risk_label",
+    "src.agents.risk_classifier_agent.agent.query_chroma_rag",
+]
+
+_BOUNDS = {
+    "weather_severity_hub": (1.18, 10.0),
+    "natural_disaster_risk": (1.18, 10.0),
+    "supply_disruption_index": (4.09, 9.97),
+    "defect_rate_pct": (2.0, 19.82),
+    "disruption_news_count": (0.0, 17.0),
+}
+
+
+class TestSelectForecastSku:
+    def test_select_forecast_sku_single_candidate(self):
+        """One-record list in, same record out unchanged (no scoring logic invoked)."""
+        rec = _replay_candidate(1, "SKU001", "HIGH", 0.6)
+        result = select_forecast_sku([rec])
+        assert result is rec
+
+    def test_select_forecast_sku_picks_highest_label(self):
+        """HIGH beats LOW and MEDIUM regardless of list order."""
+        low = _replay_candidate(1, "SKU001", "LOW", 0.9)
+        high = _replay_candidate(2, "SKU002", "HIGH", 0.1)
+        medium = _replay_candidate(3, "SKU003", "MEDIUM", 0.5)
+        result = select_forecast_sku([low, high, medium])
+        assert result["order_id"] == 2
+
+    def test_select_forecast_sku_composite_tiebreak(self):
+        """Same label, higher composite wins."""
+        a = _replay_candidate(1, "SKU001", "CRITICAL", 0.70)
+        b = _replay_candidate(2, "SKU002", "CRITICAL", 0.95)
+        result = select_forecast_sku([a, b])
+        assert result["order_id"] == 2
+
+    def test_select_forecast_sku_order_id_tiebreak(self):
+        """Same label AND composite -> lowest order_id wins, deterministically."""
+        a = _replay_candidate(5, "SKU001", "CRITICAL", 0.80)
+        b = _replay_candidate(2, "SKU002", "CRITICAL", 0.80)
+        results = [select_forecast_sku([a, b])["order_id"] for _ in range(5)]
+        assert len(set(results)) == 1
+        assert results[0] == 2
+
+    def test_select_forecast_sku_different_products_different_skus(self):
+        """Winner's sku_id must be its OWN record's, never mixed from another candidate."""
+        a = _replay_candidate(1, "SKU010", "MEDIUM", 0.40)
+        b = _replay_candidate(2, "SKU022", "HIGH", 0.90)
+        result = select_forecast_sku([a, b])
+        assert result["order_id"] == 2
+        assert result["sku_id"] == "SKU022"
+
+
+class TestForecastHandoff:
+    def test_forecast_handoff_populated_from_winner(self):
+        """ForecastHandoff.sku_id matches the winning candidate, candidates_considered==3."""
+        low = _replay_candidate(1, "SKU001", "LOW", 0.10)
+        winner = _replay_candidate(2, "SKU777", "CRITICAL", 0.95)
+        medium = _replay_candidate(3, "SKU003", "MEDIUM", 0.50)
+        state = make_state_multi([low, winner, medium])
+
+        with patch(_ENSEMBLE_PATCH_TARGETS[0]), \
+             patch(_ENSEMBLE_PATCH_TARGETS[1]), \
+             patch(_ENSEMBLE_PATCH_TARGETS[2]), \
+             patch(_ENSEMBLE_PATCH_TARGETS[3], return_value=[]), \
+             patch("src.agents.risk_classifier_agent.agent._get_norm_bounds", return_value=_BOUNDS):
+            from src.agents.risk_classifier_agent import risk_classifier_agent
+            result = risk_classifier_agent(state)
+
+        handoff = result["forecast_handoff"]
+        assert handoff is not None
+        assert handoff.sku_id == "SKU777"
+        assert handoff.candidates_considered == 3
+        assert result["risk_classification"].sku_id == "SKU777"
+
+    def test_forecast_handoff_none_when_sku_id_missing(self):
+        """Single candidate with no sku_id -> forecast_handoff is None, no exception."""
+        rec = _replay_candidate(1, None, "HIGH", 0.6)
+        del rec["sku_id"]
+        state = make_state_multi([rec])
+
+        with patch(_ENSEMBLE_PATCH_TARGETS[0]), \
+             patch(_ENSEMBLE_PATCH_TARGETS[1]), \
+             patch(_ENSEMBLE_PATCH_TARGETS[2]), \
+             patch(_ENSEMBLE_PATCH_TARGETS[3], return_value=[]), \
+             patch("src.agents.risk_classifier_agent.agent._get_norm_bounds", return_value=_BOUNDS):
+            from src.agents.risk_classifier_agent import risk_classifier_agent
+            result = risk_classifier_agent(state)
+
+        assert result["forecast_handoff"] is None
+        assert result["risk_classification"].sku_id is None
+
+
+# ── Migration idempotency (ensure_sku_id_columns) ─────────────────────────────
+
+class TestMigrationIdempotent:
+    def test_migration_idempotent(self, tmp_path):
+        """Calling ensure_sku_id_columns() twice on a pre-existing DB is a no-op
+        the second time -- no exception, sku_id present, index present."""
+        import src.utils.db_utils as db_utils
+
+        db_path = tmp_path / "migration_test.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE lite_master (record_id INTEGER PRIMARY KEY, order_region TEXT, order_date TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE risk_classifications (id INTEGER PRIMARY KEY, order_id INTEGER)"
+        )
+        conn.commit()
+        conn.close()
+
+        old_path = db_utils.DB_PATH
+        db_utils.DB_PATH = db_path
+        try:
+            db_utils.ensure_sku_id_columns()
+            db_utils.ensure_sku_id_columns()  # second call must not raise
+            with sqlite3.connect(db_path) as conn:
+                lm_cols = [r[1] for r in conn.execute("PRAGMA table_info(lite_master)")]
+                rc_cols = [r[1] for r in conn.execute("PRAGMA table_info(risk_classifications)")]
+                idx = [r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='lite_master'"
+                )]
+            assert "sku_id" in lm_cols
+            assert "sku_id" in rc_cols
+            assert any("sku_id" in name for name in idx)
+            assert any("region_date" in name for name in idx)
+        finally:
+            db_utils.DB_PATH = old_path
+
+    def test_migration_noop_on_missing_table(self, tmp_path):
+        """A completely fresh DB with no tables at all must not raise."""
+        import src.utils.db_utils as db_utils
+
+        db_path = tmp_path / "empty.db"
+        old_path = db_utils.DB_PATH
+        db_utils.DB_PATH = db_path
+        try:
+            db_utils.ensure_sku_id_columns()  # must not raise
+        finally:
+            db_utils.DB_PATH = old_path
 
 
 if __name__ == "__main__":

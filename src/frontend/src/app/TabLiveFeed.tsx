@@ -11,7 +11,13 @@ import { WeatherPanel } from "./components/live-feed/WeatherPanel";
 import { AgentLogPanel } from "./components/live-feed/AgentLogPanel";
 import { GanttStrip } from "./components/live-feed/GanttStrip";
 
-export function TabLiveFeed({ onTabSwitch }: { onTabSwitch: (t: number) => void }) {
+export function TabLiveFeed({
+  runId,
+  onTabSwitch,
+}: {
+  runId?: string;
+  onTabSwitch: (t: number) => void;
+}) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <RefreshControl />
@@ -21,9 +27,9 @@ export function TabLiveFeed({ onTabSwitch }: { onTabSwitch: (t: number) => void 
       >
         <NewsPanel />
         <WeatherPanel />
-        <AgentLogPanel onTabSwitch={onTabSwitch} />
+        <AgentLogPanel runId={runId} onTabSwitch={onTabSwitch} />
       </div>
-      <GanttStrip />
+      <GanttStrip runId={runId} />
     </div>
   );
 }
