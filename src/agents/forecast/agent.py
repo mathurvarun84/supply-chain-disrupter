@@ -702,9 +702,9 @@ def demand_forecasting_agent(state: Any) -> Dict[str, Any]:
         raise ValueError("L5: active_record is required for demand forecasting.")
 
     sku_id: Optional[str] = (
-        state.active_record.get("sku")
-        or state.active_record.get("sku_id")
+        state.active_record.get("sku_id")    # daily_records VIEW: SKU001-style crosswalk key
         or state.active_record.get("SKU_ID")
+        or state.active_record.get("sku")    # fallback: product_name alias — not an ops_kpi ID
     )
     if not sku_id:
         return {
