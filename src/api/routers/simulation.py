@@ -1,18 +1,24 @@
-from fastapi import APIRouter
+"""Forecast & Simulation (Screen 3, Simulation tab) — reads simulation_output
+for a pipeline run_id."""
+
+from fastapi import APIRouter, HTTPException
+
 from src.api.schemas import SimulationResponse
-from src.api.fixtures import MONTE_CARLO
+from src.utils.db_utils import fetch_simulation
 
 router = APIRouter()
 
 
 @router.get("/{run_id}", response_model=SimulationResponse)
-def get_simulation(run_id: str):
-    return SimulationResponse(
-        run_id=run_id,
-        p10=18.0,
-        p50=41.0,
-        p90=68.0,
-        revenue_at_risk_usd=4200000,
-        alternate_route="Cape of Good Hope",
-        histogram=MONTE_CARLO,
-    )
+def get_simulation(run_id: str) -> SimulationResponse:
+    """Reads simulation_output for run_id.
+
+    Was: hardcoded fixture values regardless of run_id.
+    Consumed by: Screen 3 Simulation tab."""
+    result = fetch_simulation(run_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No simulation result for run_id={run_id}",
+        )
+    return SimulationResponse(**result)

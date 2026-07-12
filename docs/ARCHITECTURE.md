@@ -46,12 +46,12 @@ External World
                        │
                        ▼
         ┌──────────────────────────────┐
-        │  L5 — Prophet Forecast       │  (optional — needs prophet + pandas)
+        │  L5 — Prophet Forecast       │  (required — needs prophet + pandas)
         └──────────────────────────────┘
                        │
                        ▼
         ┌──────────────────────────────┐
-        │  L6 — Monte Carlo Simulation │  (optional)
+        │  L6 — Monte Carlo Simulation │  (required)
         └──────────────────────────────┘
                        │
                        ▼
@@ -73,8 +73,9 @@ The current runtime uses a compiled `StateGraph(GlobalState)` built per scenario
 
 - `START -> L1` initializes the ingestion node with the incoming payload.
 - `L1` runs the ingestion node, which first tries the production v2 ingestion path (`data_ingestion_agent_v2`) and falls back to the legacy shim (`data_ingestion_agent`) if the newer path fails.
-- `L2 -> L3 -> L4` are the critical-path agents; they are wrapped so the graph receives a plain state delta rather than a full state object.
-- `L5 -> L6 -> L7` are optional agents. They are wrapped with skip-and-continue behavior so a failure is logged and the pipeline continues instead of aborting the whole run.
+- `L2 -> L3 -> L4 -> L5 -> L6` are all **required** critical-path agents — every pipeline run is expected to execute through risk classification, demand forecasting, and Monte Carlo simulation before mitigation.
+- `L7` (Mitigation) follows L6 and completes the chain; it is also invoked on every run but may degrade if upstream LLM calls fail.
+- L5 and L6 are **not optional skips** in the architecture: a complete run always includes Prophet forecast output and Monte Carlo percentile bands. If `prophet`/`pandas` are missing or history is too short, L5 logs `SKIPPED` and leaves `forecast_result` empty — that is an environment/data gap, not an intentional omission from the pipeline design. Similarly, L6's heuristic fallback (`model_version = "heuristic_fallback"`) is a degraded numeric estimate, not a substitute for omitting the agent.
 - The graph currently stays sequential rather than parallel: L2 and L3 are ordered one after the other because `agent_logs` is shared state and the current `GlobalState` model does not yet use LangGraph reducers for concurrent writes.
 
 `run_agent_graph()` invokes the compiled app and returns a validated `GlobalState`; a backward-compatible `run_agent_sequence()` helper remains available for debugging and manual execution.
@@ -423,7 +424,14 @@ critical_flag is set only when final_label == "CRITICAL"
 
 **Module:** `src/agents/langgraph_engine.py:demand_forecasting_agent()`
 
-Skipped automatically if `prophet` or `pandas` are not installed, or if fewer than 10 historical data points exist for the port/SKU.
+L5 is a **required** pipeline stage (`L4 → L5 → L6 → L7`). Every run invokes
+demand forecasting; L6 reads the Prophet output when present to drive per-day
+demand baselines in the Monte Carlo loop.
+
+If `prophet` or `pandas` are not installed, or fewer than 10 historical data points
+exist for the port/SKU, the agent logs `SKIPPED` and does not populate
+`forecast_result` — but the stage is still executed and the pipeline continues.
+Install `prophet` and `pandas` and ensure sufficient history for a full forecast.
 
 ```
 Flow:
@@ -438,43 +446,197 @@ Flow:
 
 ## L6 — Monte Carlo Simulation
 
-**Module:** `src/agents/simulation_agent/` (`agent.py`, `engine.py`, `priors.py`)
+**Module:** `src/agents/simulation_agent/` (`agent.py`, `engine.py`, `priors.py`)  
+**Entry point:** `simulation_agent(state: GlobalState) → Dict[str, Any]`  
+**Model version:** `mc_v1` (Monte Carlo) / `heuristic_fallback` (deterministic last resort)
 
-L6 runs a **Monte Carlo discrete-time inventory simulation** (default 2,000 trials,
-set per scenario in the Streamlit Scenario Analyzer form via `simulation_trials`).
-Each trial samples stochastic lead time,
-demand (optionally from L5 Prophet forecast), supplier reliability, and disruption
-duration, then simulates daily inventory balance over the scenario recovery window.
+L6 is a **required** pipeline stage (`L5 → L6 → L7`). It runs a
+**discrete-time inventory Monte Carlo simulation** — not a full SimPy DES model, but
+a day-by-day balance sheet over the scenario recovery window with stochastic draws
+for lead time, disruption duration, daily demand, and supplier reliability. The goal
+is to quantify **stockout probability**, **revenue-at-risk bands (P10/P50/P90)**,
+and **days-to-stockout** so L7 can rank mitigation actions with numeric tail-risk
+context.
+
+Every pipeline run executes L6. On Monte Carlo failure the agent falls back to a
+deterministic heuristic estimate (`model_version = "heuristic_fallback"`) rather than
+being omitted — L7 and the dashboard still receive percentile-shaped output.
+
+### End-to-End Flow
+
+```mermaid
+flowchart TD
+    GS[GlobalState] --> BP[build_simulation_params]
+    BP --> SP[SimulationParams]
+    SP --> MC{run_monte_carlo}
+    MC -->|success| AGG[Aggregate P10/P50/P90]
+    MC -->|exception| HF[run_heuristic_fallback]
+    AGG --> SR[SimulationResult]
+    HF --> SR
+    SR --> DB1[(simulation_runs audit table)]
+    SR --> DB2[(simulation_output per run_id)]
+    SR --> L7[L7 Mitigation Agent]
+```
 
 ```
-Inputs (from GlobalState):
-  active_record — inventory_level, incoming_supply, lead_time_days, demand, unit_price_usd
-  risk_classification — composite_score
-  forecast_result — 30-day Prophet demand path (optional)
-  event_metadata — severity, shock_duration_days, recovery_window_days, disruption_type
-  news_analysis_llm — expected_duration_days (duration prior fallback)
-  config — region_route_maps / route_maps for alternate_route
+simulation_agent(state)
+  │
+  ├─ 1. Validate active_record + config exist
+  ├─ 2. trials ← event_metadata.simulation_trials (default 2,000)
+  ├─ 3. seed ← deterministic hash(event_date, port, sku, disruption_type)
+  ├─ 4. params ← build_simulation_params(state, trials, seed)
+  │
+  ├─ 5. try run_monte_carlo(params)
+  │      └─ on failure → run_heuristic_fallback(params)  (trials_run = 0)
+  │
+  ├─ 6. insert_simulation_run(...) → simulation_runs  (audit / QA)
+  └─ 7. return { simulation_result, agent_logs }
+         (Day 8 seed script also writes simulation_output for the dashboard)
+```
 
+### Module Responsibilities
+
+| File | Role |
+|------|------|
+| `agent.py` | Orchestrator: trial count, seed, try/catch Monte Carlo vs heuristic, SQLite persistence |
+| `priors.py` | Builds `SimulationParams` from `GlobalState`, config route maps, and optional `ops_kpi` priors |
+| `engine.py` | Core simulation: single-trial loop, Monte Carlo aggregation, heuristic fallback |
+
+### Inputs (from GlobalState)
+
+| Source | Fields used |
+|--------|-------------|
+| `active_record` | `inventory_level`, `incoming_supply`, `lead_time_days`, `demand`, `sales_usd`, `unit_price_usd`, `supply_disruption_index`, `defect_rate_pct`, `port`, `sku`, `order_region`, lat/lon |
+| `event_metadata` | `severity`, `shock_duration_days`, `recovery_window_days` (simulation horizon), `disruption_type`, `simulation_trials` |
+| `risk_classification` / state | `risk_score_composite` (demand shock multiplier) |
+| `forecast_result` (L5) | 30-day Prophet `yhat` path → per-day demand baseline in Monte Carlo (empty only when L5 logged SKIPPED due to missing deps/history) |
+| `news_analysis_llm` (L2, optional) | `expected_duration_days` → disruption-duration prior when `shock_duration_days` is unset |
+| `config` | `route_maps`, `region_route_maps` → `alternate_route` recommendation |
+| `ops_kpi` (SQLite, optional) | Mean lead time, lead-time inflation, demand coefficient of variation |
+
+**Trial count:** defaults to **2,000** (`DEFAULT_TRIALS` in `agent.py`). The Streamlit
+Scenario Analyzer can override via `event_metadata.simulation_trials` (100–10,000).
+
+**Deterministic seed:** each scenario gets a reproducible seed derived from
+`(event_date, port, sku, disruption_type)` so re-running the same order produces
+identical percentile bands (useful for QA and demo repeatability).
+
+### Parameter Building (`priors.py`)
+
+`build_simulation_params()` resolves a single `SimulationParams` dataclass:
+
+```
+SimulationParams
+  initial_inventory, incoming_supply, baseline_lead_time
+  mean_daily_demand, unit_price_usd
+  horizon_days          ← recovery_window_days (default 60)
+  severity, shock_duration_days, disruption_type
+  composite_score       ← L4 risk_score_composite
+  supply_disruption_index, defect_rate_pct
+  alternate_route       ← resolve_alternate_route(config, record)
+  logistics_disruption  ← True for port closure / geopolitical / lockdown / chip shortage
+  forecast_daily_demands← L5 Prophet yhat series (falls back to mean_daily_demand if L5 logged SKIPPED)
+  expected_duration_days← L2 news LLM estimate (fallback for disruption length)
+  lead_time_inflation, demand_cv  ← ops_kpi priors when available
+  trials, seed
+```
+
+**Alternate route resolution** (first match wins):
+
+1. `config.route_maps[port].backup_route`
+2. `config.region_route_maps[order_region].backup_route`
+3. Built-in `REGION_ROUTE_DEFAULTS` (e.g. Western Europe → Cape of Good Hope)
+4. Nearest semiconductor hub from lat/lon → hub route map
+5. Fallback: `"Cape of Good Hope"`
+
+### Single-Trial Mechanics (`engine.py`)
+
+Each Monte Carlo trial simulates **one disruption scenario** over `horizon_days`:
+
+```
 Per trial:
-  1. Sample lead time (lognormal, inflated by severity + supply_disruption_index)
-  2. Sample disruption duration from shock_duration_days or news LLM estimate
-  3. Daily inventory balance: demand shock during disruption, inbound after lead time
-  4. Track stockout day, unmet demand, revenue loss
-
-Aggregates:
-  stockout_probability_pct     — fraction of trials with stockout × 100
-  stockout_probability_p10/p90 — severity score percentiles
-  revenue_impact_usd_p10/p50/p90
-  days_to_stockout_p10/p50/p90
-  expected_inventory_gap_pct, alternate_route, trials_run, model_version
-
-Persistence: simulation_runs table (insert_simulation_run in db_utils.py)
-
-Output: GlobalState.simulation_result
+  1. Sample lead_time       ← lognormal(baseline_lead_time), inflated by:
+                               severity, supply_disruption_index, lead_time_inflation,
+                               logistics_disruption flag
+  2. Sample disruption_end  ← shock_duration_days ± 1 day jitter,
+                               OR lognormal(expected_duration_days) from L2,
+                               OR normal(3 + severity×14) fallback
+  3. Supplier reliability   ← Bernoulli(0.55 + (1−severity)×0.35) when incoming_supply > 0
+                               → unreliable supplier zeroes inbound shipment
+  4. Schedule inbound       ← incoming_qty arrives on day = lead_time
+  5. Daily loop (day 0 … horizon−1):
+       a. Add scheduled inbound to inventory
+       b. Sample daily demand:
+            - base = Prophet forecast[day] if L5 ran, else mean_daily_demand
+            - noise ~ Normal(1.0, demand_cv)
+            - if day < disruption_end: demand × (1 + severity×0.5 + composite×0.3)
+            - yield loss from defect_rate_pct (up to 30% reduction)
+            - post-disruption dampening when forecast path exists
+       c. Fulfill demand from inventory; track unmet demand + first stockout day
+  6. Compute trial outputs:
+       stockout flag, days_to_stockout, revenue_loss = unmet × unit_price_usd,
+       severity_score = unmet/total_demand × 100 (min 50 if stockout occurred)
 ```
 
-On failure, L6 falls back to a deterministic heuristic and still attempts persistence.
-L6 is optional — failures are caught by `_optional_node` and do not block L7.
+This is a **discrete-time balance model** — inventory is a scalar updated once per
+day; there is no queueing network or multi-echelon logic. Complexity is intentional:
+fast enough for 2,000 trials on CPU while still producing meaningful P10/P50/P90 bands.
+
+### Monte Carlo Aggregation
+
+After `trials` independent runs (minimum 100 enforced):
+
+| Output field | Computation |
+|--------------|-------------|
+| `stockout_probability_pct` | % of trials where inventory hit zero |
+| `stockout_probability_p10/p90` | P10/P90 of per-trial **severity_score** (unmet-demand ratio) |
+| `revenue_impact_usd_p10/p50/p90` | Percentiles of `unmet_demand × unit_price_usd` |
+| `days_to_stockout_p10/p50/p90` | Percentiles of first stockout day (stockout trials only) |
+| `expected_inventory_gap_pct` | Mean severity score across all trials |
+| `revenue_impact_samples` | Up to 100 subsampled values (histogram input for dashboard) |
+| `alternate_route` | Passed through from priors (not re-sampled) |
+| `trials_run`, `model_version` | Audit metadata |
+
+### Heuristic Fallback
+
+If `run_monte_carlo()` raises (e.g. bad params, numpy error), L6 falls back to
+`run_heuristic_fallback()` — a **deterministic** estimate with `trials_run = 0`:
+
+```
+stockout_probability ≈ composite×100 + inventory shortfall term + lead_time term + severity×15
+revenue_p50          ≈ mean_daily_demand × unit_price × (stockout_prob/100) × 7 days
+p10/p90              ← ±40% band around the point estimate
+```
+
+The fallback still persists to `simulation_runs` so QA can distinguish real Monte Carlo
+runs from degraded ones (`model_version = "heuristic_fallback"`).
+
+### Persistence
+
+L6 writes simulation output to **two** SQLite surfaces:
+
+| Table | Written by | Purpose |
+|-------|-----------|---------|
+| `simulation_runs` | `insert_simulation_run()` in `agent.py` | Audit row per agent invocation: P10/P50/P90 stockout + revenue, alternate route, full `payload_json` |
+| `simulation_output` | `scripts/seed_demo_run.py` / Day 9 pipeline | Per-`run_id` snapshot for Screen 3 (`GET /api/simulation/{run_id}`): histogram JSON + revenue-at-risk |
+
+The dashboard reads **`simulation_output`** (keyed by pipeline `run_id`); QA scripts
+and evaluation read **`simulation_runs`** (keyed by event_date/port/sku).
+
+### Downstream Consumers
+
+| Consumer | Fields used |
+|----------|-------------|
+| **L7 Mitigation** | `stockout_probability_pct`, `stockout_probability_p90`, `revenue_impact_usd_p50`, `alternate_route` — drives urgency (P90 > 60% → CRITICAL) and ranked action text |
+| **Screen 3 (Forecast & Simulation tab)** | P10/P50/P90 bands, revenue-at-risk USD, histogram buckets, alternate route |
+| **Observability** | `agent_execution_log` timing row for `L6_simulation` |
+
+### Validation
+
+```bash
+python -m pytest tests/test_simulation_agent.py -v
+python evaluation/qa_12_simulation_agent.py   # end-to-end + simulation_runs persistence
+```
 
 ---
 
@@ -660,7 +822,8 @@ The system is designed to degrade gracefully — each missing component falls ba
 | `live_enrichment` rows | L1v2 uses base historical record without overlay |
 | Fine-tuned embedder | Base `all-MiniLM-L6-v2` used for Stage 1 RAG |
 | Cross-encoder | Bi-encoder distance sort used for Stage 2 |
-| `prophet` / `pandas` | L5 demand forecasting skipped entirely |
+| `prophet` / `pandas` not installed | L5 still runs but logs `SKIPPED`; `forecast_result` empty — L6 uses mean demand instead of Prophet path |
+| L6 Monte Carlo exception | L6 still runs; heuristic fallback with `trials_run = 0` — agent is not omitted |
 | HF Hub TLS (corporate proxy) | Set `HF_INSECURE_SSL=1` or `INGEST_INSECURE_SSL=1` |
 
 ---

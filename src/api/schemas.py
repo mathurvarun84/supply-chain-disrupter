@@ -1,4 +1,4 @@
-from typing import List, Optional, Literal, Dict
+from typing import Any, List, Optional, Literal, Dict
 from pydantic import BaseModel
 
 AgentStatus = Literal["Idle", "Running", "Complete", "Skipped-Optional", "Failed-Fallback"]
@@ -10,6 +10,7 @@ class AgentState(BaseModel):
     id: str
     name: str
     status: AgentStatus
+    duration_ms: Optional[float] = None
 
 
 class PipelineStatus(BaseModel):
@@ -19,15 +20,25 @@ class PipelineStatus(BaseModel):
     last_ingested_at: Optional[str] = None
     openai_status: Literal["connected", "disconnected"] = "connected"
     langfuse_trace_url: Optional[str] = None
+    is_complete: bool = False
+    current_phase: Optional[str] = None
+
+
+DemoScenarioId = Literal[
+    "taiwan_earthquake", "red_sea_crisis", "guardrail_demo", "clean_baseline"
+]
 
 
 class PipelineRunRequest(BaseModel):
     mode: Literal["live", "demo", "replay"]
-    demo_scenario_id: Optional[str] = None
+    demo_scenario_id: Optional[DemoScenarioId] = None
+    replay_run_id: Optional[str] = None
 
 
 class PipelineRunResponse(BaseModel):
     run_id: str
+    mode: Literal["live", "demo", "replay"]
+    accepted_at: str
 
 
 class NewsItem(BaseModel):
@@ -193,3 +204,32 @@ class GoldQARow(BaseModel):
     source_collection: Optional[str] = None
     source_chunk_id: Optional[str] = None
     query_style: Literal["agent_pattern", "natural_question"] = "natural_question"
+
+
+class DatabaseStatus(BaseModel):
+    database_exists: bool
+    tables: Optional[Dict[str, int]] = None
+    date_range: Optional[str] = None
+    categories: Optional[List[str]] = None
+    unique_products: Optional[int] = None
+    size_mb: Optional[float] = None
+
+
+class AdminJobStatus(BaseModel):
+    status: Literal["idle", "running", "complete", "failed"]
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    error: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+class AdminJobTriggerResponse(BaseModel):
+    status: Literal["started", "skipped_already_running"]
+    triggered_at: str
+
+
+class AdminStatusResponse(BaseModel):
+    database: DatabaseStatus
+    db_job: AdminJobStatus
+    rag_job: AdminJobStatus
+    corpus: List[CorpusHealth]

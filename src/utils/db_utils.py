@@ -1,4 +1,6 @@
+import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -112,7 +114,102 @@ def ensure_schema() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_execution_log_run_id ON agent_execution_log(run_id)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS forecast_output (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'Laptops',
+                categories_json TEXT NOT NULL,
+                series_json TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_forecast_output_run_id ON forecast_output(run_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS simulation_output (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE,
+                p10 REAL NOT NULL,
+                p50 REAL NOT NULL,
+                p90 REAL NOT NULL,
+                revenue_at_risk_usd REAL NOT NULL,
+                alternate_route TEXT NOT NULL,
+                histogram_json TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mitigation_output (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE,
+                urgency TEXT NOT NULL,
+                ranked_actions_json TEXT NOT NULL,
+                rag_query_trace_json TEXT NOT NULL,
+                india_sourcing_json TEXT NOT NULL,
+                slack_preview TEXT NOT NULL,
+                cost_delta_usd REAL NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS risk_classification_output (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL UNIQUE,
+                final_label TEXT NOT NULL,
+                composite_score REAL,
+                critical_flag INTEGER NOT NULL DEFAULT 0,
+                full_result_json TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guardrail_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                dir TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                pass_count INTEGER NOT NULL DEFAULT 0,
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '—',
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
     ensure_simulation_schema()
+
+
+def ensure_sku_id_columns() -> None:
+    """
+    Idempotent migration: adds sku_id to lite_master and risk_classifications
+    if either table predates the SKU_Product_Mapping crosswalk work, and adds
+    the region/date index used by candidate-gathering. Safe to call on every
+    app startup -- checks PRAGMA table_info before altering, so it's a no-op
+    on databases already built by the updated etl_loader.py.
+    """
+    with get_connection() as conn:
+        for table in ("lite_master", "risk_classifications"):
+            cols = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+            if cols and "sku_id" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN sku_id TEXT")
+                conn.commit()
+        # lite_master is guaranteed to exist by this point (etl_loader runs first);
+        # guard anyway so this function is safe on a completely fresh environment.
+        lm_cols = [row["name"] for row in conn.execute("PRAGMA table_info(lite_master)")]
+        if lm_cols:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_lite_master_sku_id ON lite_master(sku_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_lite_master_region_date ON lite_master(order_region, order_date)")
+        conn.commit()
 
 
 def ensure_ingestion_schema() -> None:
@@ -524,13 +621,16 @@ def ensure_risk_classification_table() -> None:
                 rag_citations   TEXT,
                 rationale       TEXT,
                 full_result_json TEXT,
-                run_ts          TEXT DEFAULT CURRENT_TIMESTAMP
+                run_ts          TEXT DEFAULT CURRENT_TIMESTAMP,
+                sku_id          TEXT
             )
             """
         )
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_classifications)")}
         if "full_result_json" not in existing_cols:
             conn.execute("ALTER TABLE risk_classifications ADD COLUMN full_result_json TEXT")
+        if "sku_id" not in existing_cols:
+            conn.execute("ALTER TABLE risk_classifications ADD COLUMN sku_id TEXT")
 
 
 def insert_risk_classification(
@@ -548,6 +648,7 @@ def insert_risk_classification(
     rag_citations: List[str],
     rationale: str,
     full_result_json: Optional[str] = None,
+    sku_id: Optional[str] = None,
 ) -> None:
     """Persist one L4 classification run. full_result_json, when provided,
     is a serialized RiskClassificationResult (rule/distilbert/llm/judge
@@ -555,7 +656,8 @@ def insert_risk_classification(
     return the complete ensemble detail instead of rule-signal-only —
     see risk.py's _response_from_cached_row. Rows inserted before this
     column existed simply have it NULL, and the reader falls back to the
-    rule-only view for those."""
+    rule-only view for those. sku_id is None for rows whose source record
+    predates the SKU_Product_Mapping crosswalk."""
     import json as _json
     ensure_risk_classification_table()
     execute_non_query(
@@ -563,8 +665,9 @@ def insert_risk_classification(
         INSERT INTO risk_classifications
           (order_id, mode, composite_score, geo_component, supply_component,
            freight_component, defect_component, duration_days, base_label,
-           final_label, escalated, rag_citations, rationale, full_result_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           final_label, escalated, rag_citations, rationale, full_result_json,
+           sku_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             order_id, mode, round(composite_score, 4),
@@ -572,7 +675,7 @@ def insert_risk_classification(
             round(freight_component, 4), round(defect_component, 4),
             duration_days, base_label, final_label,
             int(escalated), _json.dumps(rag_citations), rationale,
-            full_result_json,
+            full_result_json, sku_id,
         ),
     )
 
@@ -642,3 +745,665 @@ def fetch_scenario_options() -> List[Dict[str, Any]]:
         """
     )
     return [dict(row) for row in rows]
+
+
+# ── Day 8 read helpers (Screen 1–5) ─────────────────────────────────────────
+
+_HUB_CITIES_ORDER = [
+    "Hsinchu", "Osaka", "Austin", "Shanghai", "Singapore", "Rotterdam",
+]
+
+_AGENT_LEVEL_MAP = {
+    "L1_ingestion": "L1",
+    "L2_news": "L2",
+    "L3_weather": "L3",
+    "L4_risk_classifier": "L4",
+    "L5_forecast": "L5",
+    "L6_simulation": "L6",
+    "L7_mitigation": "L7",
+}
+
+_AGENT_TAB_MAP = {
+    "L1_ingestion": 0,
+    "L2_news": 1,
+    "L3_weather": 1,
+    "L4_risk_classifier": 1,
+    "L5_forecast": 2,
+    "L6_simulation": 2,
+    "L7_mitigation": 3,
+}
+
+_AGENT_GANTT_COLORS = {
+    "Complete": "#22C55E",
+    "Running": "#818CF8",
+    "Failed-Fallback": "#F59E0B",
+    "Skipped-Optional": "#475569",
+}
+
+_VERDICT_TYPE_COLORS = {
+    "unanimous": "#22C55E",
+    "majority_rule": "#3B82F6",
+    "override_distilbert": "#8B5CF6",
+    "override_llm": "#8B5CF6",
+    "defer_to_rules": "#F59E0B",
+    "no_judge": "#475569",
+}
+
+_VERDICT_TYPE_LABELS = {
+    "unanimous": "Unanimous",
+    "majority_rule": "Majority Rule",
+    "override_distilbert": "DistilBERT Override",
+    "override_llm": "LLM Override",
+    "defer_to_rules": "Defer to Rules",
+    "no_judge": "No Judge",
+}
+
+
+def fetch_live_news(limit: int = 50) -> Dict[str, Any]:
+    """Read the latest live_news_ingest batch for Screen 1 NewsPanel.
+
+    Returns dict with run_id, count, fetched_at, items (list of row dicts).
+    Table: live_news_ingest."""
+    rows = execute_query(
+        """
+        SELECT hub_city, hub_country, supplier_country, headline,
+               published_at, relevance_score, query_term, source_feed,
+               fetched_at_utc, run_id
+        FROM live_news_ingest
+        WHERE run_id = (
+            SELECT run_id FROM live_news_ingest ORDER BY fetched_at_utc DESC LIMIT 1
+        )
+        ORDER BY relevance_score DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    if not rows:
+        return {"run_id": None, "count": 0, "fetched_at": None, "items": []}
+    items = [dict(row) for row in rows]
+    return {
+        "run_id": rows[0]["run_id"],
+        "count": len(items),
+        "fetched_at": rows[0]["fetched_at_utc"],
+        "items": items,
+    }
+
+
+def fetch_live_weather() -> Dict[str, Any]:
+    """Read live_weather_ingest for the 6 fab hub cities (Screen 1 WeatherPanel).
+
+    Recomputes is_trigger_hub from raw_severity_score >= 7.0 — never trusts the
+    stored is_trigger_hub column. Table: live_weather_ingest."""
+    rows = execute_query(
+        """
+        SELECT hub_city, wind_speed_kmh, precipitation_mm, weather_code,
+               temperature_c, raw_severity_score, is_trigger_hub, fetched_at_utc, run_id
+        FROM live_weather_ingest
+        WHERE run_id = (
+            SELECT run_id FROM live_weather_ingest ORDER BY fetched_at_utc DESC LIMIT 1
+        )
+        """
+    )
+    by_hub = {row["hub_city"]: dict(row) for row in rows}
+    hubs: List[Dict[str, Any]] = []
+    for hub_name in _HUB_CITIES_ORDER:
+        row = by_hub.get(hub_name)
+        if row is None:
+            hubs.append({"hub_city": hub_name, "is_trigger_hub": False})
+        else:
+            severity = row.get("raw_severity_score")
+            trigger = severity is not None and float(severity) >= 7.0
+            hubs.append(
+                {
+                    "hub_city": row["hub_city"],
+                    "wind_speed_kmh": row.get("wind_speed_kmh"),
+                    "precipitation_mm": row.get("precipitation_mm"),
+                    "weather_code": row.get("weather_code"),
+                    "temperature_c": row.get("temperature_c"),
+                    "raw_severity_score": severity,
+                    "is_trigger_hub": trigger,
+                    "fetched_at_utc": row.get("fetched_at_utc"),
+                }
+            )
+    return {
+        "run_id": rows[0]["run_id"] if rows else None,
+        "fetched_at": rows[0]["fetched_at_utc"] if rows else None,
+        "hubs": hubs,
+    }
+
+
+def fetch_run_logs(run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Read agent_execution_log for a pipeline run_id (Screen 1 AgentLogPanel).
+
+    Returns clickable log lines with level, text, tab, source='real'.
+    Table: agent_execution_log."""
+    rows = execute_query(
+        """
+        SELECT agent_name, status, started_at, completed_at, duration_ms, error_message
+        FROM agent_execution_log
+        WHERE run_id = ?
+        ORDER BY started_at ASC, id ASC
+        LIMIT ?
+        """,
+        (run_id, limit),
+    )
+    lines: List[Dict[str, Any]] = []
+    for row in rows:
+        agent = row["agent_name"]
+        level = _AGENT_LEVEL_MAP.get(agent, agent)
+        tab = _AGENT_TAB_MAP.get(agent, 0)
+        status = row["status"] or "Complete"
+        dur_s = (row["duration_ms"] or 0) / 1000.0
+        if row["error_message"]:
+            text = f"{level}: {status} — {row['error_message']}"
+        else:
+            text = f"{level}: {status} ({dur_s:.1f}s)"
+        lines.append({"level": level, "text": text, "tab": tab, "source": "real"})
+    return lines
+
+
+def fetch_run_gantt(run_id: str) -> List[Dict[str, Any]]:
+    """Build Gantt bars from agent_execution_log timing (Screen 1 GanttStrip).
+
+    Converts started_at/completed_at per agent to {id, start, dur, color}.
+    Table: agent_execution_log."""
+    rows = execute_query(
+        """
+        SELECT agent_name, status, started_at, completed_at, duration_ms
+        FROM agent_execution_log
+        WHERE run_id = ?
+        ORDER BY started_at ASC, id ASC
+        """,
+        (run_id,),
+    )
+    if not rows:
+        return []
+
+    def _parse_ts(ts: Optional[str]) -> float:
+        if not ts:
+            return 0.0
+        try:
+            normalized = ts.replace("Z", "+00:00")
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return 0.0
+
+    base_ts = _parse_ts(rows[0]["started_at"])
+    bars: List[Dict[str, Any]] = []
+    for row in rows:
+        agent = row["agent_name"]
+        level = _AGENT_LEVEL_MAP.get(agent, agent)
+        start_ts = _parse_ts(row["started_at"])
+        start = round(max(0.0, start_ts - base_ts), 1)
+        dur = round((row["duration_ms"] or 0) / 1000.0, 1)
+        if dur <= 0 and row["completed_at"]:
+            dur = round(max(0.1, _parse_ts(row["completed_at"]) - start_ts), 1)
+        color = _AGENT_GANTT_COLORS.get(row["status"] or "Complete", "#22C55E")
+        bars.append(
+            {"id": level, "start": start, "dur": dur, "color": color, "source": "real"}
+        )
+    return bars
+
+
+def fetch_latest_pipeline_run_id() -> Optional[str]:
+    """Return the most recent pipeline run_id from agent_execution_log, or None."""
+    rows = execute_query(
+        "SELECT run_id FROM agent_execution_log ORDER BY id DESC LIMIT 1"
+    )
+    return rows[0]["run_id"] if rows else None
+
+
+def insert_forecast_output(
+    run_id: str,
+    category: str,
+    categories: List[str],
+    series: List[Dict[str, Any]],
+) -> None:
+    """Persist one Prophet forecast snapshot for a pipeline run."""
+    ensure_schema()
+    execute_non_query(
+        """
+        INSERT INTO forecast_output (run_id, category, categories_json, series_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (run_id, category, json.dumps(categories), json.dumps(series)),
+    )
+
+
+def fetch_forecast(run_id: str, category: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Read forecast_output for run_id (Screen 3 Forecast tab).
+
+    Optional category filters the selected category label; series is always
+    returned for the stored snapshot. Table: forecast_output."""
+    rows = execute_query(
+        "SELECT * FROM forecast_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    categories = json.loads(row["categories_json"])
+    series = json.loads(row["series_json"])
+    selected = category or row["category"] or (categories[0] if categories else "Laptops")
+    return {
+        "run_id": run_id,
+        "category": selected,
+        "categories": categories,
+        "series": series,
+    }
+
+
+def insert_simulation_output(
+    run_id: str,
+    p10: float,
+    p50: float,
+    p90: float,
+    revenue_at_risk_usd: float,
+    alternate_route: str,
+    histogram: List[Dict[str, Any]],
+) -> None:
+    """Persist one SimPy/Monte Carlo snapshot keyed by pipeline run_id."""
+    ensure_schema()
+    execute_non_query(
+        """
+        INSERT OR REPLACE INTO simulation_output (
+            run_id, p10, p50, p90, revenue_at_risk_usd, alternate_route, histogram_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            p10,
+            p50,
+            p90,
+            revenue_at_risk_usd,
+            alternate_route,
+            json.dumps(histogram),
+        ),
+    )
+
+
+def fetch_simulation(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read simulation_output for run_id (Screen 3 Simulation tab).
+
+    Table: simulation_output."""
+    rows = execute_query(
+        "SELECT * FROM simulation_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    return {
+        "run_id": run_id,
+        "p10": row["p10"],
+        "p50": row["p50"],
+        "p90": row["p90"],
+        "revenue_at_risk_usd": row["revenue_at_risk_usd"],
+        "alternate_route": row["alternate_route"],
+        "histogram": json.loads(row["histogram_json"]),
+    }
+
+
+def insert_mitigation_output(
+    run_id: str,
+    urgency: str,
+    ranked_actions: List[Dict[str, Any]],
+    rag_query_trace: List[str],
+    india_sourcing_recommendations: List[str],
+    slack_preview: str,
+    cost_delta_usd: float,
+) -> None:
+    """Persist full MitigationResponse payload for a pipeline run_id."""
+    ensure_schema()
+    execute_non_query(
+        """
+        INSERT OR REPLACE INTO mitigation_output (
+            run_id, urgency, ranked_actions_json, rag_query_trace_json,
+            india_sourcing_json, slack_preview, cost_delta_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            urgency,
+            json.dumps(ranked_actions),
+            json.dumps(rag_query_trace),
+            json.dumps(india_sourcing_recommendations),
+            slack_preview,
+            cost_delta_usd,
+        ),
+    )
+
+
+def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read mitigation_output for run_id (Screen 4 Mitigation tab).
+
+    Table: mitigation_output (+ RAG trace stored in rag_query_trace_json)."""
+    rows = execute_query(
+        "SELECT * FROM mitigation_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    return {
+        "run_id": run_id,
+        "urgency": row["urgency"],
+        "ranked_actions": json.loads(row["ranked_actions_json"]),
+        "rag_query_trace": json.loads(row["rag_query_trace_json"]),
+        "india_sourcing_recommendations": json.loads(row["india_sourcing_json"]),
+        "slack_preview": row["slack_preview"],
+        "cost_delta_usd": row["cost_delta_usd"],
+    }
+
+
+def insert_risk_classification_output(
+    run_id: str,
+    final_label: str,
+    composite_score: Optional[float],
+    critical_flag: bool,
+    full_result_json: str,
+) -> None:
+    """Persist L4's RiskClassificationResult keyed by pipeline run_id.
+
+    Separate from risk_classifications (order_id-keyed, written directly by
+    risk_classifier_agent for Screen 2's historical-order lookup) — this
+    table is the run_id-keyed snapshot for a live/demo/replay pipeline run,
+    following the same pattern as simulation_output/mitigation_output."""
+    ensure_schema()
+    execute_non_query(
+        """
+        INSERT OR REPLACE INTO risk_classification_output (
+            run_id, final_label, composite_score, critical_flag, full_result_json
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (run_id, final_label, composite_score, int(critical_flag), full_result_json),
+    )
+
+
+def fetch_risk_classification_output(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read risk_classification_output for a pipeline run_id. Table:
+    risk_classification_output (see insert_risk_classification_output)."""
+    rows = execute_query(
+        "SELECT * FROM risk_classification_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    return {
+        "run_id": run_id,
+        "final_label": row["final_label"],
+        "composite_score": row["composite_score"],
+        "critical_flag": bool(row["critical_flag"]),
+        "full_result": json.loads(row["full_result_json"]),
+    }
+
+
+_PIPELINE_AGENTS = [
+    ("L1", "L1_ingestion"),
+    ("L2", "L2_news"),
+    ("L3", "L3_weather"),
+    ("L4", "L4_risk_classifier"),
+    ("L5", "L5_forecast"),
+    ("L6", "L6_simulation"),
+    ("L7", "L7_mitigation"),
+]
+
+
+def build_idle_agents() -> List[Dict[str, Any]]:
+    """The 7-entry all-Idle agent list, shared by fetch_pipeline_status()
+    (a run_id with zero agent_execution_log rows yet) and the pipeline
+    router's pre-L1 "fetching live data" placeholder status."""
+    return [
+        {
+            "id": agent_id, "name": agent_name, "status": "Idle",
+            "started_at": None, "completed_at": None, "error_message": None,
+            "duration_ms": None,
+        }
+        for agent_id, agent_name in _PIPELINE_AGENTS
+    ]
+
+
+def fetch_recent_completed_run_ids(limit: int = 10) -> List[Dict[str, Any]]:
+    """Recent run_ids whose L7_mitigation agent reached a terminal status —
+    the pool Replay mode's run picker offers (POST /run with mode="replay"
+    only accepts an already-completed run_id)."""
+    rows = execute_query(
+        """
+        SELECT run_id, MAX(started_at) AS last_started_at
+        FROM agent_execution_log
+        WHERE agent_name = 'L7_mitigation' AND status IN ('Complete', 'Failed-Fallback')
+        GROUP BY run_id
+        ORDER BY last_started_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return [{"run_id": row["run_id"], "last_started_at": row["last_started_at"]} for row in rows]
+
+
+def fetch_pipeline_status(run_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Reshape agent_execution_log rows for one run_id into the 7-entry
+    Idle/Running/Complete/Skipped-Optional/Failed-Fallback contract GET
+    /api/pipeline/status returns. When run_id is None, resolves to the most
+    recently active run (fetch_latest_pipeline_run_id()) so the status bar
+    has something to show before any run has been explicitly selected.
+    Returns None only when run_id was given explicitly and no rows exist
+    for it at all."""
+    resolved_run_id = run_id or fetch_latest_pipeline_run_id()
+    if resolved_run_id is None:
+        return None
+
+    rows = execute_query(
+        """
+        SELECT agent_name, status, started_at, completed_at, duration_ms, error_message
+        FROM agent_execution_log
+        WHERE run_id = ?
+        ORDER BY id ASC
+        """,
+        (resolved_run_id,),
+    )
+    if run_id is not None and not rows:
+        return None
+
+    latest_by_agent: Dict[str, sqlite3.Row] = {}
+    for row in rows:
+        latest_by_agent[row["agent_name"]] = row
+
+    agents: List[Dict[str, Any]] = []
+    for agent_id, agent_name in _PIPELINE_AGENTS:
+        row = latest_by_agent.get(agent_name)
+        if row is None:
+            agents.append(
+                {
+                    "id": agent_id, "name": agent_name, "status": "Idle",
+                    "started_at": None, "completed_at": None, "error_message": None,
+                    "duration_ms": None,
+                }
+            )
+            continue
+        status = row["status"]
+        # L5/L6 are optional: run_agent_sequence() catches their exception
+        # outside agent_span(), after it already wrote "Failed-Fallback" —
+        # translate that into "Skipped-Optional" here rather than teaching
+        # agent_span() (used by every agent, required and optional alike)
+        # about per-agent optionality.
+        if agent_id in ("L5", "L6") and status == "Failed-Fallback":
+            status = "Skipped-Optional"
+        agents.append(
+            {
+                "id": agent_id, "name": agent_name, "status": status,
+                "started_at": row["started_at"], "completed_at": row["completed_at"],
+                "error_message": row["error_message"], "duration_ms": row["duration_ms"],
+            }
+        )
+
+    is_complete = latest_by_agent.get("L7_mitigation") is not None and latest_by_agent["L7_mitigation"]["status"] in (
+        "Complete", "Failed-Fallback",
+    )
+    last_started = rows[0]["started_at"] if rows else None
+
+    return {
+        "run_id": resolved_run_id,
+        "agents": agents,
+        "last_ingested_at": last_started,
+        "is_complete": is_complete,
+    }
+
+
+def fetch_cost_by_agent() -> List[Dict[str, Any]]:
+    """SUM(cost_usd) GROUP BY agent_name from llm_call_log (Screen 5)."""
+    rows = execute_query(
+        """
+        SELECT agent_name AS agent, ROUND(SUM(cost_usd), 6) AS cost
+        FROM llm_call_log
+        GROUP BY agent_name
+        ORDER BY cost DESC
+        """
+    )
+    return [{"agent": r["agent"], "cost": r["cost"] or 0.0} for r in rows]
+
+
+def fetch_verdict_distribution() -> List[Dict[str, Any]]:
+    """COUNT verdict_type from risk_classifications.full_result_json (Screen 5).
+
+    Parses judge_verdict.verdict_type; legacy rows without JSON bucket as no_judge."""
+    rows = execute_query(
+        "SELECT full_result_json FROM risk_classifications WHERE full_result_json IS NOT NULL"
+    )
+    counts: Dict[str, int] = {}
+    for row in rows:
+        try:
+            parsed = json.loads(row["full_result_json"])
+            jv = parsed.get("judge_verdict") or {}
+            vtype = jv.get("verdict_type") or "no_judge"
+        except (json.JSONDecodeError, TypeError):
+            vtype = "no_judge"
+        counts[vtype] = counts.get(vtype, 0) + 1
+
+    if not counts:
+        legacy = execute_query(
+            "SELECT final_label, COUNT(*) AS cnt FROM risk_classifications GROUP BY final_label"
+        )
+        for row in legacy:
+            key = f"label_{row['final_label']}"
+            counts[key] = row["cnt"]
+
+    total = sum(counts.values()) or 1
+    result = []
+    for vtype, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+        label = _VERDICT_TYPE_LABELS.get(vtype, vtype.replace("_", " ").title())
+        color = _VERDICT_TYPE_COLORS.get(vtype, "#64748B")
+        result.append(
+            {"name": label, "value": round(cnt / total * 100), "color": color}
+        )
+    return result
+
+
+def _percentile(values: List[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    idx = int(len(sorted_vals) * pct)
+    idx = min(idx, len(sorted_vals) - 1)
+    return sorted_vals[idx]
+
+
+def fetch_latency_percentiles() -> List[Dict[str, Any]]:
+    """P50/P90 latency_ms per agent from llm_call_log (Screen 5).
+
+    Percentiles computed in Python — sqlite3 has no PERCENTILE_CONT."""
+    rows = execute_query(
+        """
+        SELECT agent_name, latency_ms
+        FROM llm_call_log
+        WHERE latency_ms IS NOT NULL
+        ORDER BY agent_name, latency_ms
+        """
+    )
+    buckets: Dict[str, List[float]] = {}
+    for row in rows:
+        buckets.setdefault(row["agent_name"], []).append(float(row["latency_ms"]) / 1000.0)
+
+    result = []
+    for agent, values in sorted(buckets.items()):
+        result.append(
+            {
+                "agent": agent,
+                "p50": round(_percentile(values, 0.50), 3),
+                "p90": round(_percentile(values, 0.90), 3),
+            }
+        )
+    return result
+
+
+def fetch_prompt_log(limit: int = 100) -> List[Dict[str, Any]]:
+    """Latest LLM call rows from llm_call_log (Screen 5 prompt inspector)."""
+    rows = execute_query(
+        """
+        SELECT ts, agent_name, model, prompt_preview, full_prompt, full_response,
+               total_tokens, cost_usd, latency_ms
+        FROM llm_call_log
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return [
+        {
+            "ts": r["ts"] or "",
+            "agent": r["agent_name"] or "",
+            "model": r["model"] or "",
+            "prompt": r["prompt_preview"] or "",
+            "full_prompt": r["full_prompt"] or r["prompt_preview"] or "",
+            "resp": r["full_response"] or "",
+            "tokens": r["total_tokens"] or 0,
+            "cost": r["cost_usd"] or 0.0,
+            "latency": round((r["latency_ms"] or 0.0) / 1000.0, 3),
+        }
+        for r in rows
+    ]
+
+
+def insert_guardrail_event(
+    name: str,
+    direction: str,
+    agent: str,
+    pass_count: int,
+    fail_count: int,
+    reason: str = "—",
+) -> None:
+    """Insert or refresh one guardrail_events aggregate row."""
+    ensure_schema()
+    execute_non_query(
+        """
+        INSERT INTO guardrail_events (name, dir, agent, pass_count, fail_count, reason)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (name, direction, agent, pass_count, fail_count, reason),
+    )
+
+
+def fetch_guardrail_events() -> List[Dict[str, Any]]:
+    """Read guardrail_events rows (Screen 5 Guardrails tab)."""
+    rows = execute_query(
+        """
+        SELECT name, dir, agent, pass_count, fail_count, reason
+        FROM guardrail_events
+        ORDER BY id ASC
+        """
+    )
+    return [dict(row) for row in rows]
+
+
+def build_stockout_histogram(stockout_pcts: List[float]) -> List[Dict[str, Any]]:
+    """Bucket stockout probability samples into 10% histogram bins for simulation_output."""
+    bins = [
+        "0-10%", "10-20%", "20-30%", "30-40%", "40-50%",
+        "50-60%", "60-70%", "70-80%", "80-90%", "90-100%",
+    ]
+    counts = [0] * len(bins)
+    for pct in stockout_pcts:
+        idx = min(int(max(pct, 0.0) / 10.0), len(bins) - 1)
+        counts[idx] += 1
+    return [{"range": label, "count": count} for label, count in zip(bins, counts)]

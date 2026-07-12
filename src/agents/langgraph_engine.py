@@ -196,10 +196,11 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
     run_id is taken from payload["run_id"] when present; a new UUID is minted
     otherwise so observability works even when called directly without one.
     """
-    from src.utils.db_utils import ensure_schema
+    from src.utils.db_utils import ensure_schema, ensure_sku_id_columns
     from src.utils.observability import agent_span, pipeline_trace
 
     ensure_schema()
+    ensure_sku_id_columns()
 
     run_id: str = payload.get("run_id") or str(uuid.uuid4())
     mode: str = payload.get("mode", "live")

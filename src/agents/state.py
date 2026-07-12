@@ -36,6 +36,26 @@ class ForecastResult(BaseModel):
     expected_drop_pct: float
 
 
+class ForecastHandoff(BaseModel):
+    """
+    Snapshot L4 hands to L5 so L5 never needs to re-query lite_master for
+    basic context. Sourced from the SINGLE winning record select_forecast_sku()
+    chose -- never from a non-winning candidate. All fields except sku_id,
+    risk_score_composite, and risk_label are Optional because they mirror
+    lite_master columns that can themselves be null/missing on some rows.
+    """
+    sku_id: str
+    order_id: Optional[Any] = None
+    product_name: Optional[str] = None
+    category_name: Optional[str] = None
+    order_date: Optional[str] = None
+    unit_price_usd: Optional[float] = None
+    sales_usd: Optional[float] = None
+    risk_score_composite: float
+    risk_label: str
+    candidates_considered: int = 1   # audit trail: how many records were in play for this event
+
+
 class SimulationResult(BaseModel):
     stockout_probability_pct: float
     expected_inventory_gap_pct: float
@@ -296,12 +316,20 @@ class RiskClassificationResult(BaseModel):
     distilbert_signal: Optional[DistilBERTSignal] = None
     llm_signal: Optional[LLMSignal] = None
     judge_verdict: Optional[JudgeVerdict] = None
+    sku_id: Optional[str] = None  # from active_record.sku_id; None if the
+                                   # source workbook predates the crosswalk
+                                   # or used the strict-1:1 mapping variant
 
 
 class GlobalState(BaseModel):
     event_metadata: Optional[EventMetadata] = None
     config: Optional[Dict[str, Any]] = None
     active_record: Optional[Dict[str, Any]] = None
+    # Every record a single event could plausibly implicate (region-wide demo
+    # scenarios, etc). Normally just [active_record] -- see select_forecast_sku()
+    # in risk_classifier_agent, which picks exactly one before L4's ensemble runs.
+    candidate_records: List[Dict[str, Any]] = Field(default_factory=list)
+    forecast_handoff: Optional[ForecastHandoff] = None  # L4's context snapshot for L5
     ingestion_run_id: Optional[str] = None  # UUID from L1; links state to live_news_ingest / live_weather_ingest rows
     news_signals: List[NewsRiskSignal] = Field(default_factory=list)
     live_weather_severity: Optional[float] = None

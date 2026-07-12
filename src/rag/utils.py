@@ -27,6 +27,7 @@ precedents, export control, India sourcing).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -705,3 +706,160 @@ def query_chroma_rag(
         {"text": doc, "metadata": metadata, "distance": distance}
         for doc, metadata, distance in zip(documents, metadatas, distances)
     ]
+
+
+# ── Day 8 Screen 6 read helpers ─────────────────────────────────────────────
+
+RAGAS_SCORES_PATH = PROJECT_ROOT / "evaluation" / "ragas" / "ragas_scores_full.json"
+RAGAS_GOLD_DATASET_PATH = PROJECT_ROOT / "evaluation" / "ragas" / "test_dataset.json"
+
+_RAGAS_METRIC_THRESHOLDS = {
+    "Faithfulness": 0.75,
+    "Answer Relevance": 0.80,
+    "Context Precision": 0.70,
+    "Context Recall": 0.75,
+}
+
+_RAGAS_METRIC_KEY_MAP = {
+    "faithfulness": "Faithfulness",
+    "answer_relevancy": "Answer Relevance",
+    "context_precision": "Context Precision",
+    "context_recall": "Context Recall",
+}
+
+_NAMED_COLLECTIONS = (
+    "historical_precedents",
+    "export_control_corpus",
+    "india_sourcing_corpus",
+)
+
+
+def fetch_corpus_health() -> List[Dict[str, Any]]:
+    """Live collection.count() for all 3 named ChromaDB collections (Screen 6).
+
+    Returns list of {name, docs, real, synth, last_ingested_at} dicts.
+    real/synth split inferred from [SOURCE: SYNTHESIZED] tag in chunk text."""
+    from src.rag.collections import COLLECTION_NAMES
+
+    client = get_chroma_client()
+    embed_fn = get_embedding_model()
+    results: List[Dict[str, Any]] = []
+
+    for cname in COLLECTION_NAMES.values():
+        try:
+            col = client.get_collection(name=cname, embedding_function=embed_fn)
+        except Exception:
+            results.append(
+                {
+                    "name": cname,
+                    "docs": 0,
+                    "real": 0,
+                    "synth": 0,
+                    "last_ingested_at": "not ingested",
+                }
+            )
+            continue
+
+        total = col.count()
+        synth = 0
+        if total > 0:
+            try:
+                batch = col.get(include=["documents"])
+                docs = batch.get("documents") or []
+                synth = sum(
+                    1 for doc in docs if doc and "[SOURCE: SYNTHESIZED]" in doc
+                )
+            except Exception:
+                synth = 0
+        real = max(0, total - synth)
+        meta = col.metadata or {}
+        chroma_mtime = CHROMA_DIR.stat().st_mtime if CHROMA_DIR.exists() else None
+        if chroma_mtime:
+            from datetime import datetime, timezone
+            ingested = datetime.fromtimestamp(chroma_mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+        else:
+            ingested = meta.get("last_ingested_at") or "—"
+        results.append(
+            {
+                "name": cname,
+                "docs": total,
+                "real": real,
+                "synth": synth,
+                "last_ingested_at": str(ingested),
+            }
+        )
+    return results
+
+
+def fetch_ragas_scorecard() -> List[Dict[str, Any]]:
+    """Read persisted RAGAS Phase 3 full-mode scores (Screen 6 scorecard).
+
+    Source: evaluation/ragas/ragas_scores_full.json overall metrics.
+    Returns empty list when the evaluation file is absent (scope cut)."""
+    if not RAGAS_SCORES_PATH.exists():
+        return []
+    try:
+        payload = json.loads(RAGAS_SCORES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    overall = payload.get("overall") or {}
+    run_at = payload.get("run_at_utc") or ""
+    tiles: List[Dict[str, Any]] = []
+    for key, label in _RAGAS_METRIC_KEY_MAP.items():
+        score = overall.get(key)
+        if score is None:
+            continue
+        threshold = _RAGAS_METRIC_THRESHOLDS[label]
+        tiles.append(
+            {
+                "metric": label,
+                "score": round(float(score), 4),
+                "threshold": threshold,
+                "passed": float(score) >= threshold,
+            }
+        )
+    if run_at and tiles:
+        pass  # run_at retained in JSON source only — RagasScore schema unchanged
+    return tiles
+
+
+def fetch_gold_dataset(limit: int = 50) -> List[Dict[str, Any]]:
+    """Read chunk-grounded gold QA rows from RAGAS Phase 1 output (Screen 6).
+
+    Source: evaluation/ragas/test_dataset.json test_cases, with match inferred
+    from ragas_scores_full.json per_case faithfulness when available."""
+    if not RAGAS_GOLD_DATASET_PATH.exists():
+        return []
+    try:
+        dataset = json.loads(RAGAS_GOLD_DATASET_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    per_case_match: Dict[str, bool] = {}
+    if RAGAS_SCORES_PATH.exists():
+        try:
+            scores = json.loads(RAGAS_SCORES_PATH.read_text(encoding="utf-8"))
+            for case in scores.get("per_case") or []:
+                q = case.get("question")
+                if q:
+                    per_case_match[q] = float(case.get("faithfulness") or 0) >= 0.75
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    rows: List[Dict[str, Any]] = []
+    for case in (dataset.get("test_cases") or [])[:limit]:
+        question = case.get("question") or ""
+        rows.append(
+            {
+                "question": question,
+                "ground_truth": case.get("ground_truth") or "",
+                "match": per_case_match.get(question, True),
+                "source_collection": case.get("source_collection"),
+                "source_chunk_id": case.get("source_chunk_id"),
+                "query_style": case.get("query_style") or "natural_question",
+            }
+        )
+    return rows

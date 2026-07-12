@@ -23,7 +23,12 @@ from typing import Any, Dict, List, Optional
 from src.agents.distilbert_signal import run_distilbert_inference
 from src.agents.risk_classifier_agent.judge_agent import run_judge
 from src.agents.risk_classifier_agent.llm_signal import run_llm_signal
-from src.agents.state import GlobalState, RiskClassificationResult, RuleBasedSignal
+from src.agents.state import (
+    ForecastHandoff,
+    GlobalState,
+    RiskClassificationResult,
+    RuleBasedSignal,
+)
 from src.utils.db_utils import (
     ensure_risk_classification_table,
     execute_query,
@@ -356,6 +361,62 @@ def _cross_check_known_severity(year: Optional[Any], final_label: str) -> None:
         pass  # cross-check is non-blocking
 
 
+# ── Candidate selection (pre-L4-ensemble, cheap, no-LLM) ─────────────────────
+
+_LABEL_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
+def select_forecast_sku(candidate_records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Pick exactly ONE record from N event-impacted candidates, BEFORE the
+    expensive parts of the pipeline (L4's LLM ensemble, L5's Prophet fit)
+    run on more than one. Forwarding multiple sku_ids to L5 means Prophet
+    fits once per sku_id -- this function is what prevents that.
+
+    Selection order (deterministic -- must never depend on dict/set
+    iteration order or wall-clock time, or evaluation runs stop being
+    reproducible):
+      1. Highest disruption_event_label severity (CRITICAL > HIGH > MEDIUM > LOW)
+      2. Highest risk_score_composite
+      3. Lowest order_id (stable tie-break of last resort)
+
+    REPLAY candidates already carry a stored risk_score_composite +
+    disruption_event_label in lite_master -- use those directly, matching
+    risk_classifier_agent()'s own REPLAY-mode trust-the-stored-value rule.
+    Only a LIVE/injected candidate lacking a stored composite gets the
+    cheap rule-based _compute_components()/_composite_from_components()
+    scoring risk_classifier_agent() already uses for LIVE mode -- this
+    function NEVER calls the LLM ensemble; that only runs once, afterward,
+    on the single winner.
+    """
+    if not candidate_records:
+        raise ValueError("select_forecast_sku() requires at least one candidate record.")
+    if len(candidate_records) == 1:
+        return candidate_records[0]
+
+    def _rank_key(rec: Dict[str, Any]):
+        label = rec.get("disruption_event_label")
+        composite = rec.get("risk_score_composite")
+        if label is None or composite is None or str(label).strip() in ("", "None", "nan"):
+            # LIVE candidate with no stored value yet -- cheap rule-based
+            # score only, never the LLM ensemble. Reuses the exact same
+            # component/weight helpers risk_classifier_agent() uses for LIVE mode.
+            components = _compute_components(
+                live_weather_severity=None,   # no per-candidate live weather fetch here -- see SCOPE CUTS
+                natural_disaster_risk=rec.get("natural_disaster_risk"),
+                supply_disruption_index=rec.get("supply_disruption_index"),
+                news_signals=[],
+                defect_rate_pct=rec.get("defect_rate_pct"),
+                order_region=rec.get("order_region"),
+            )
+            composite = _composite_from_components(components)
+            label = _base_label_from_delivery_status(rec.get("delivery_status"), composite)
+        order_id = rec.get("order_id") or rec.get("record_id") or 0
+        return (_LABEL_RANK.get(label, 0), composite, -int(order_id))
+
+    return max(candidate_records, key=_rank_key)
+
+
 # ── Agent node ────────────────────────────────────────────────────────────────
 
 def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
@@ -375,8 +436,19 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
     if state.event_metadata is None or state.active_record is None:
         raise ValueError("Data ingestion and record load are required for risk classification.")
 
-    record = state.active_record
+    candidates = state.candidate_records or ([state.active_record] if state.active_record else [])
+    if not candidates:
+        raise ValueError("Data ingestion and record load are required for risk classification.")
+    record = select_forecast_sku(candidates)
+    if len(candidates) > 1:
+        logger.info(
+            "L4: %d candidates for this event; selected order_id=%s sku_id=%s (%s, composite=%s)",
+            len(candidates), record.get("order_id"), record.get("sku_id"),
+            record.get("disruption_event_label"), record.get("risk_score_composite"),
+        )
+
     order_id = record.get("order_id") or record.get("record_id")
+    sku_id = record.get("sku_id")  # None for rows loaded before the crosswalk work
 
     # ── Mode detection ────────────────────────────────────────────────────────
     stored_composite = record.get("risk_score_composite")
@@ -556,6 +628,7 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
         escalated=escalated,
         rag_citations=rag_citations,
         rationale=rationale,
+        sku_id=sku_id,
         full_result_json=json.dumps(
             {
                 "rule_signal": rule_signal.model_dump(),
@@ -600,12 +673,32 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
         distilbert_signal=distilbert_signal,
         llm_signal=llm_signal,
         judge_verdict=judge_verdict,
+        sku_id=sku_id,
     )
+
+    # ── L4 -> L5 handoff ──────────────────────────────────────────────────────
+    # Only ever built from the winning record `select_forecast_sku()` chose --
+    # never fabricated when sku_id is missing (pre-crosswalk data).
+    forecast_handoff = None
+    if sku_id:
+        forecast_handoff = ForecastHandoff(
+            sku_id=sku_id,
+            order_id=record.get("order_id"),
+            product_name=record.get("product_name"),
+            category_name=record.get("category_name"),
+            order_date=record.get("order_date"),
+            unit_price_usd=record.get("unit_price_usd"),
+            sales_usd=record.get("sales_usd"),
+            risk_score_composite=composite_score,
+            risk_label=final_label,
+            candidates_considered=len(candidates),
+        )
 
     llm_tag = "(ensemble+gpt-4o)" if llm_signal else "(ensemble rule-only)"
     return {
         "risk_classification": result,
         "judge_verdict": judge_verdict,
+        "forecast_handoff": forecast_handoff,
         "agent_logs": state.agent_logs + [
             f"L4: Risk classification {llm_tag}. mode={mode} "
             f"composite={composite_score:.3f} base={base_label} "

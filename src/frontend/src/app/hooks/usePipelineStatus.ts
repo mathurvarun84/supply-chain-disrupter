@@ -1,31 +1,20 @@
+/**
+ * Polls GET /api/pipeline/status for one run_id (or the most recently
+ * active run when runId is undefined — the app's initial-load default).
+ * Polls every 2s while the run is still in progress, and stops once
+ * is_complete flips true so a finished run doesn't keep hitting the API.
+ */
 import { useQuery } from "@tanstack/react-query";
-import type { AgentStatus } from "../components/AgentNode";
-import { API_BASE_URL } from "../api/config";
+import { fetchPipelineStatus } from "../api/pipeline";
 
-export interface AgentState {
-  id: string;
-  name: string;
-  status: AgentStatus;
-}
+export type { PipelineStatus, AgentState } from "../types/pipeline";
 
-export interface PipelineStatus {
-  run_id: string;
-  source_type: "LIVE" | "DEMO-INJECTED" | "REPLAY";
-  agents: AgentState[];
-  last_ingested_at: string | null;
-  openai_status: "connected" | "disconnected";
-  langfuse_trace_url: string | null;
-}
+const STATUS_POLL_INTERVAL_MS = 2_000;
 
-async function fetchPipelineStatus(): Promise<PipelineStatus> {
-  const res = await fetch(`${API_BASE_URL}/api/pipeline/status`);
-  if (!res.ok) throw new Error(`pipeline/status failed: ${res.status}`);
-  return res.json();
-}
-
-export function usePipelineStatus() {
+export function usePipelineStatus(runId?: string) {
   return useQuery({
-    queryKey: ["pipeline-status"],
-    queryFn: fetchPipelineStatus,
+    queryKey: ["pipeline-status", runId ?? "latest"],
+    queryFn: () => fetchPipelineStatus(runId),
+    refetchInterval: (query) => (query.state.data?.is_complete ? false : STATUS_POLL_INTERVAL_MS),
   });
 }

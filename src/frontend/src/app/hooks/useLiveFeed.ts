@@ -39,11 +39,18 @@ export function useIngestStatus(pollFast: boolean) {
   });
 }
 
+// A run_id being active means a pipeline run is (or was just) in flight —
+// poll fast (2s, matching usePipelineStatus's cadence) so new L2-L7 rows
+// show up promptly instead of waiting up to 15s. No run_id means there's
+// nothing new to wait for, so fall back to the slow interval.
+const ACTIVE_RUN_POLL_MS = 2_000;
+const IDLE_POLL_MS = 15_000;
+
 export function useLiveFeedLogs(runId?: string) {
   return useQuery({
     queryKey: ["live-feed", "logs", runId],
     queryFn: () => fetchLiveFeedLogs(runId),
-    refetchInterval: 15_000,
+    refetchInterval: runId ? ACTIVE_RUN_POLL_MS : IDLE_POLL_MS,
   });
 }
 
@@ -51,7 +58,7 @@ export function useLiveFeedGantt(runId?: string) {
   return useQuery({
     queryKey: ["live-feed", "gantt", runId],
     queryFn: () => fetchLiveFeedGantt(runId),
-    refetchInterval: 15_000,
+    refetchInterval: runId ? ACTIVE_RUN_POLL_MS : IDLE_POLL_MS,
   });
 }
 

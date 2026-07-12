@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routers import (
-    pipeline, live_feed, risk, forecast, simulation, mitigation, observability, guardrails, rag,
+    pipeline, live_feed, risk, forecast, simulation, mitigation, observability, guardrails, rag, admin,
 )
 
 app = FastAPI(
@@ -33,8 +33,9 @@ app.include_router(mitigation.router, prefix="/api/mitigation", tags=["mitigatio
 app.include_router(observability.router, prefix="/api/observability", tags=["observability"])
 app.include_router(guardrails.router, prefix="/api/guardrails", tags=["guardrails"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "mode": "fixtures"}
+    return {"status": "ok", "mode": "real-data"}

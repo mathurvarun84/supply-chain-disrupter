@@ -12,17 +12,20 @@ export function AgentNode({
   id,
   name,
   status,
+  duration_ms = null,
   compact = false,
 }: {
   id: string;
   name: string;
   status: AgentStatus;
+  duration_ms?: number | null;
   compact?: boolean;
 }) {
+  const durationLabel = duration_ms != null ? `${(duration_ms / 1000).toFixed(1)}s` : null;
   return (
     <div className="flex flex-col items-center gap-0.5">
       <div
-        title={`${id}: ${name} — ${status}`}
+        title={`${id}: ${name} — ${status}${durationLabel ? ` (${durationLabel})` : ""}`}
         className={`flex items-center justify-center rounded font-mono font-bold text-[10px] border-[1.5px] ${
           compact ? "w-8 h-7" : "w-10 h-9"
         } ${status === "Running" ? "animate-pulse" : ""} ${STATUS_CLASSES[status]}`}
@@ -32,6 +35,11 @@ export function AgentNode({
       {!compact && (
         <span className="text-[9px] text-muted-foreground text-center leading-none" style={{ maxWidth: 44 }}>
           {name}
+        </span>
+      )}
+      {!compact && durationLabel && (
+        <span className="text-[8px] font-mono text-muted-foreground text-center leading-none">
+          {durationLabel}
         </span>
       )}
     </div>

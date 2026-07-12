@@ -22,7 +22,7 @@ const CIRCUMFERENCE = 2 * Math.PI * 38; // r=38, matches the mockup's radius
 // stroke-dashoffset instead (the countFill token's mechanism, applied
 // through a transition rather than a literal @keyframes countFill).
 export function VerdictCard({ data }: { data: RiskClassification }) {
-  const { final_label, rule_signal, threshold, run_id, mode, from_cache } = data;
+  const { final_label, rule_signal, threshold, run_id, mode } = data;
   const score = rule_signal.composite_score;
   const targetOffset = CIRCUMFERENCE * (1 - Math.min(score, 1));
 
@@ -65,8 +65,7 @@ export function VerdictCard({ data }: { data: RiskClassification }) {
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
           <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mb-2">
-            Risk Verdict — run_id {run_id} ({mode}
-            {from_cache ? ", cached" : ""})
+            Verdict for order {run_id} ({mode})
           </div>
           <RiskBadge level={final_label} pulse size="lg" />
           <div

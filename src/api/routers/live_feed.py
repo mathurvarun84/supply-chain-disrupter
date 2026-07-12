@@ -42,8 +42,7 @@ from src.api.live_feed_schemas import (
     RefreshTriggeredResponse,
     WeatherHub,
 )
-from src.utils.db_utils import execute_query
-from src.utils.ingestion_connectors import HUB_CITIES
+from src.utils.db_utils import execute_query, fetch_live_news, fetch_live_weather, fetch_run_gantt, fetch_run_logs
 
 router = APIRouter()
 
@@ -74,26 +73,10 @@ def _score_tier(score: Optional[float]) -> str:
 @router.get("/news", response_model=LiveFeedNewsResponse)
 def get_live_feed_news():
     """Return the most recent batch of ingested news headlines for Screen 1's
-    News panel. Reads only from `live_news_ingest` (populated by
-    `DataIngestionAgent.run_batch()` via the News/RSS connectors) — this
-    endpoint never calls an external API itself and never touches
-    LangGraph/L2-L7. Returns an explicit empty payload (not a 404/500) when no
-    ingestion run has happened yet, so the frontend can render a clear
-    "no data yet" state instead of an error."""
-    rows = execute_query(
-        """
-        SELECT hub_city, hub_country, supplier_country, headline,
-               published_at, relevance_score, query_term, source_feed,
-               fetched_at_utc, run_id
-        FROM live_news_ingest
-        WHERE run_id = (
-            SELECT run_id FROM live_news_ingest ORDER BY fetched_at_utc DESC LIMIT 1
-        )
-        ORDER BY relevance_score DESC
-        LIMIT 50
-        """
-    )
-    if not rows:
+    News panel. Reads live_news_ingest via fetch_live_news() — never calls an
+    external API or LangGraph/L2-L7."""
+    payload = fetch_live_news(limit=50)
+    if not payload["items"]:
         return LiveFeedNewsResponse(run_id=None, count=0, fetched_at=None, items=[])
 
     items = [
@@ -108,64 +91,38 @@ def get_live_feed_news():
             source_feed=row["source_feed"],
             score_tier=_score_tier(row["relevance_score"]),
         )
-        for row in rows
+        for row in payload["items"]
     ]
     return LiveFeedNewsResponse(
-        run_id=rows[0]["run_id"],
-        count=len(items),
-        fetched_at=rows[0]["fetched_at_utc"],
+        run_id=payload["run_id"],
+        count=payload["count"],
+        fetched_at=payload["fetched_at"],
         items=items,
     )
 
 
 @router.get("/weather", response_model=LiveFeedWeatherResponse)
 def get_live_feed_weather():
-    """Return live severity data for all 6 configured fab-hub cities for
-    Screen 1's Weather panel. Reads only from `live_weather_ingest`
-    (populated by DataIngestionAgent's Open-Meteo connector). Always returns
-    all 6 cities from `HUB_CITIES` (src/utils/ingestion_connectors.py) — NOT
-    config/india_electronics.yaml's `ports:` key, which lists unrelated
-    Indian logistics ports — so the grid never silently drops a hub. A
-    missing row becomes an explicit "no data yet" card rather than an
-    absent one."""
-    configured_hubs = list(HUB_CITIES.keys())
+    """Return live severity for all 6 fab-hub cities via fetch_live_weather().
 
-    rows = execute_query(
-        """
-        SELECT hub_city, wind_speed_kmh, precipitation_mm, weather_code,
-               temperature_c, raw_severity_score, is_trigger_hub, fetched_at_utc, run_id
-        FROM live_weather_ingest
-        WHERE run_id = (
-            SELECT run_id FROM live_weather_ingest ORDER BY fetched_at_utc DESC LIMIT 1
+    is_trigger_hub is server-recomputed from raw_severity_score >= 7.0."""
+    payload = fetch_live_weather()
+    hubs = [
+        WeatherHub(
+            hub_city=hub["hub_city"],
+            wind_speed_kmh=hub.get("wind_speed_kmh"),
+            precipitation_mm=hub.get("precipitation_mm"),
+            weather_code=hub.get("weather_code"),
+            temperature_c=hub.get("temperature_c"),
+            raw_severity_score=hub.get("raw_severity_score"),
+            is_trigger_hub=bool(hub.get("is_trigger_hub")),
+            fetched_at_utc=hub.get("fetched_at_utc"),
         )
-        """
-    )
-    by_hub = {row["hub_city"]: row for row in rows}
-
-    hubs = []
-    for hub_name in configured_hubs:
-        row = by_hub.get(hub_name)
-        if row is None:
-            # No ingested row yet for this hub — explicit empty card rather
-            # than silently dropping it from the 6-city grid.
-            hubs.append(WeatherHub(hub_city=hub_name, is_trigger_hub=False))
-        else:
-            hubs.append(
-                WeatherHub(
-                    hub_city=row["hub_city"],
-                    wind_speed_kmh=row["wind_speed_kmh"],
-                    precipitation_mm=row["precipitation_mm"],
-                    weather_code=row["weather_code"],
-                    temperature_c=row["temperature_c"],
-                    raw_severity_score=row["raw_severity_score"],
-                    is_trigger_hub=bool(row["is_trigger_hub"]),
-                    fetched_at_utc=row["fetched_at_utc"],
-                )
-            )
-
+        for hub in payload["hubs"]
+    ]
     return LiveFeedWeatherResponse(
-        run_id=rows[0]["run_id"] if rows else None,
-        fetched_at=rows[0]["fetched_at_utc"] if rows else None,
+        run_id=payload["run_id"],
+        fetched_at=payload["fetched_at"],
         hubs=hubs,
     )
 
@@ -261,14 +218,15 @@ def _build_real_l1_log_line() -> LogLineResponse:
 
 @router.get("/logs", response_model=LiveFeedLogsResponse)
 def get_live_feed_logs(run_id: str | None = None):
-    """Return the Agent Log panel's lines: one real L1 line built from
-    `ingestion_run_log`, followed by the existing Day-1 fixture lines for
-    L2-L7 UNCHANGED (tagged source="stub"). Do not regenerate, reorder, or
-    restyle the L2-L7 fixture lines here — only the L1 entry is allowed to
-    change in this function. L2-L7 become real on Day 9 when the LangGraph
-    pipeline is wired in. `run_id` is accepted for forward API compatibility
-    with Day 9 but is not yet used to scope the L1 query (only one batch's
-    log rows exist per run today)."""
+    """Return Agent Log lines from agent_execution_log when run_id is set and
+    rows exist; otherwise one real L1 line + Day-1 L2-L7 fixture stubs."""
+    if run_id:
+        real_lines = fetch_run_logs(run_id)
+        if real_lines:
+            return LiveFeedLogsResponse(
+                lines=[LogLineResponse(**line) for line in real_lines]
+            )
+
     l1_line = _build_real_l1_log_line()
     stub_lines = [
         LogLineResponse(level=line["level"], text=line["text"], tab=line["tab"], source="stub")
@@ -300,11 +258,15 @@ def _build_real_l1_gantt_bar() -> GanttBarResponse:
 
 @router.get("/gantt", response_model=LiveFeedGanttResponse)
 def get_live_feed_gantt(run_id: str | None = None):
-    """Return the Gantt strip's bars: one real L1 bar computed from
-    `ingestion_run_log` durations, followed by the existing Day-1 fixture
-    bars for L2-L7 UNCHANGED (tagged source="stub"). Same real/stub split
-    rule as `get_live_feed_logs` — only the L1 bar may change here. `run_id`
-    is accepted for forward API compatibility with Day 9."""
+    """Return Gantt bars from agent_execution_log when run_id is set and rows
+    exist; otherwise one real L1 bar + Day-1 L2-L7 fixture stubs."""
+    if run_id:
+        real_bars = fetch_run_gantt(run_id)
+        if real_bars:
+            return LiveFeedGanttResponse(
+                bars=[GanttBarResponse(**bar) for bar in real_bars]
+            )
+
     l1_bar = _build_real_l1_gantt_bar()
     stub_bars = [
         GanttBarResponse(id=bar["id"], start=bar["start"], dur=bar["dur"], color=bar["color"], source="stub")

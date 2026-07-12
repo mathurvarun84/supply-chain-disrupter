@@ -1,17 +1,19 @@
 /**
  * Screen 1 (Live Feed) — Pipeline Timeline Gantt strip, below the 3-column grid.
- * Real data source: GET /api/live-feed/gantt. Only the L1 bar in this
- * component's data is real (from ingestion_run_log durations); the L2-L7
- * bars are the unmodified Day-1 fixture data (source="stub") and will
- * become real on Day 9 — do not edit the L2-L7 fixture values from this
- * component. Stub bars render dimmed so the scope cut stays visible.
+ * Real data source: GET /api/live-feed/gantt?run_id=. L2-L7 bars are real
+ * once a run_id is active (fetch_run_gantt() reads agent_execution_log's
+ * duration_ms per agent); without an active run_id the endpoint falls back
+ * to Day-1 fixture stub bars (source="stub"), rendered dimmed so the
+ * fallback stays visible.
  */
+import { RefreshCw } from "lucide-react";
 import { useLiveFeedGantt } from "../../hooks/useLiveFeed";
 
-export function GanttStrip() {
-  const { data, isLoading, isError } = useLiveFeedGantt();
+export function GanttStrip({ runId }: { runId?: string }) {
+  const { data, isLoading, isError } = useLiveFeedGantt(runId);
   const bars = data?.bars ?? [];
   const totalDuration = bars.length > 0 ? Math.max(...bars.map((b) => b.start + b.dur)) : 0;
+  const waitingForRun = Boolean(runId) && bars.length > 0 && bars.every((b) => b.source === "stub");
 
   return (
     <div className="px-3 pb-3 shrink-0">
@@ -24,6 +26,12 @@ export function GanttStrip() {
         )}
         {isError && (
           <div className="text-xs text-risk-critical">Could not load Gantt data.</div>
+        )}
+        {waitingForRun && (
+          <div className="flex items-center gap-1.5 text-[10px] text-status-running mb-1.5">
+            <RefreshCw size={9} className="animate-spin shrink-0" />
+            Pipeline running — timeline will populate as agents complete.
+          </div>
         )}
         <div className="space-y-1">
           {bars.map((row) => (
