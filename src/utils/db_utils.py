@@ -289,6 +289,41 @@ def fetch_latest_weather_signal(hub: str) -> Optional[Dict[str, Any]]:
     return dict(rows[0]) if rows else None
 
 
+def fetch_latest_llm_call_log(run_id: str, agent_name: str) -> Optional[Dict[str, Any]]:
+    """Return the most recent llm_call_log row for (run_id, agent_name), or None."""
+    ensure_schema()
+    rows = execute_query(
+        """
+        SELECT * FROM llm_call_log
+        WHERE run_id = ? AND agent_name = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (run_id, agent_name),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def fetch_recent_composite_scores(days: int) -> List[float]:
+    """Return composite_score values from risk_classifications in the last `days` days."""
+    # ensure_schema() does NOT create risk_classifications — that table is
+    # created separately by ensure_risk_classification_table(), normally
+    # invoked lazily inside insert_risk_classification(). On a freshly
+    # built database where no classification has ever been written yet,
+    # calling ensure_schema() here left the table missing and this query
+    # crashed with "no such table: risk_classifications" (PR review).
+    ensure_risk_classification_table()
+    rows = execute_query(
+        """
+        SELECT composite_score FROM risk_classifications
+        WHERE run_ts >= datetime('now', ?)
+        ORDER BY run_ts DESC
+        """,
+        (f"-{int(days)} days",),
+    )
+    return [row["composite_score"] for row in rows]
+
+
 def fetch_recent_news(
     region: Optional[str] = None, limit: int = 20
 ) -> List[Dict[str, Any]]:

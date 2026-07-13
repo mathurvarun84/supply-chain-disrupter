@@ -37,11 +37,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.evaluation.patch_registry import claim_patch, release_patch
+
 logger = logging.getLogger(__name__)
 
 _RAGAS_DIR = Path(__file__).resolve().parent
 TRACES_DIR = _RAGAS_DIR / "traces"
 TEST_DATASET_PATH = _RAGAS_DIR / "test_dataset.json"
+
+# Targets that must be coordinated with other patchers (currently only
+# TruLens — see docs/specs/2026-07-06-trulens-integration-design.md,
+# "RAGAS Coexistence"). Retrieval targets aren't patched by anything else,
+# so they're always claimed unconditionally.
+_REGISTRY_GATED_ATTRS = {"call_openai_structured"}
 
 # (module path, attribute, kind) — kinds: "retrieval" | "llm"
 PATCH_SPECS = [
@@ -132,11 +140,20 @@ class RAGTraceCollector:
         self.records: List[dict] = []
         self._pending: Optional[dict] = None
         self._patches: List[tuple] = []  # (module, attr, original)
+        self._claimed: set[str] = set()
 
     # -- patching ------------------------------------------------------------
 
     def __enter__(self) -> "RAGTraceCollector":
         for module_path, attr, kind in PATCH_SPECS:
+            if attr in _REGISTRY_GATED_ATTRS:
+                if not claim_patch(attr, "ragas"):
+                    logger.warning(
+                        "Skipping patch of %s — already claimed by another tracer", attr
+                    )
+                    continue
+                self._claimed.add(attr)
+
             module = importlib.import_module(module_path)
             original = getattr(module, attr)
             wrapper = self._make_wrapper(original, attr, kind)
@@ -167,6 +184,9 @@ class RAGTraceCollector:
                 except Exception:
                     logger.error("Failed to restore %s.%s", module, attr)
             self._patches.clear()
+            for attr in self._claimed:
+                release_patch(attr, "ragas")
+            self._claimed.clear()
         return False  # re-raise any exception after restore
 
     def _make_wrapper(self, original, attr: str, kind: str):
