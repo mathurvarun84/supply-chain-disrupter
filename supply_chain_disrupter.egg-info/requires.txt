@@ -11,6 +11,7 @@ requests<3,>=2.31
 sentence-transformers<6,>=5
 streamlit<2,>=1.40
 langgraph<2,>=1.2
+yfinance<2,>=0.2
 
 [dev]
 pytest<10,>=8

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,16 +54,23 @@ def ensure_schema() -> None:
             """
             CREATE TABLE IF NOT EXISTS mitigation_actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
                 event_date TEXT,
                 port TEXT,
                 sku TEXT,
                 risk_label TEXT,
+                summary TEXT,
                 recommendation TEXT,
+                urgency TEXT,
                 cost_delta TEXT,
+                rag_citations_json TEXT,
+                india_sourcing_json TEXT,
                 inserted_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        _ensure_mitigation_actions_columns(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mitigation_actions_run_id ON mitigation_actions(run_id)")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS agent_execution_log (
@@ -181,13 +188,41 @@ def ensure_schema() -> None:
                 agent TEXT NOT NULL,
                 pass_count INTEGER NOT NULL DEFAULT 0,
                 fail_count INTEGER NOT NULL DEFAULT 0,
-                reason TEXT NOT NULL DEFAULT '—',
+                reason TEXT NOT NULL DEFAULT 'ΓÇö',
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
     ensure_simulation_schema()
     ensure_forecast_schema()
+
+
+def _ensure_mitigation_actions_columns(conn: sqlite3.Connection) -> None:
+    """Backfill newer mitigation_actions columns on older local databases."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(mitigation_actions)")}
+    additions = [
+        ("run_id", "TEXT"),
+        ("summary", "TEXT"),
+        ("urgency", "TEXT"),
+        ("rag_citations_json", "TEXT"),
+        ("india_sourcing_json", "TEXT"),
+    ]
+    for column_name, ddl in additions:
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE mitigation_actions ADD COLUMN {column_name} {ddl}")
+
+
+def _normalize_mitigation_urgency(urgency: Optional[str]) -> str:
+    if not urgency:
+        return "LOW"
+    urgency_upper = urgency.upper()
+    if urgency_upper == "CRITICAL":
+        return "IMMEDIATE"
+    if urgency_upper in {"IMMEDIATE", "HIGH", "MEDIUM", "LOW"}:
+        return urgency_upper
+    if urgency_upper == "ROUTINE":
+        return "LOW"
+    return "LOW"
 
 
 def ensure_sku_id_columns() -> None:
@@ -306,7 +341,7 @@ def fetch_latest_llm_call_log(run_id: str, agent_name: str) -> Optional[Dict[str
 
 def fetch_recent_composite_scores(days: int) -> List[float]:
     """Return composite_score values from risk_classifications in the last `days` days."""
-    # ensure_schema() does NOT create risk_classifications — that table is
+    # ensure_schema() does NOT create risk_classifications ΓÇö that table is
     # created separately by ensure_risk_classification_table(), normally
     # invoked lazily inside insert_risk_classification(). On a freshly
     # built database where no classification has ever been written yet,
@@ -422,21 +457,67 @@ def update_risk_label(
 
 
 def insert_mitigation_action(
+    *,
+    run_id: Optional[str],
     event_date: str,
     port: str,
     sku: str,
     risk_label: str,
-    recommendation: str,
+    summary: str,
+    recommendations: List[str],
+    urgency: str,
     cost_delta: str,
+    rag_citations: List[str],
+    india_sourcing_recommendations: List[str],
 ) -> None:
+    """Persist the agent's real mitigation output keyed by pipeline run_id.
+
+    `recommendations` stays JSON-encoded in the legacy recommendation column
+    for backwards compatibility. The new columns keep the run-specific
+    summary and provenance available to the API without recreating any values.
+    """
     execute_non_query(
         """
         INSERT INTO mitigation_actions
-        (event_date, port, sku, risk_label, recommendation, cost_delta)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (run_id, event_date, port, sku, risk_label, summary, recommendation,
+         urgency, cost_delta, rag_citations_json, india_sourcing_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (event_date, port, sku, risk_label, recommendation, cost_delta),
+        (
+            run_id,
+            event_date,
+            port,
+            sku,
+            risk_label,
+            summary,
+            json.dumps(recommendations),
+            urgency,
+            cost_delta,
+            json.dumps(rag_citations),
+            json.dumps(india_sourcing_recommendations),
+        ),
     )
+
+
+def fetch_mitigation_action_output(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read the agent's persisted mitigation output for a pipeline run_id."""
+    ensure_schema()
+    rows = execute_query(
+        "SELECT * FROM mitigation_actions WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    row = dict(rows[0])
+    return {
+        "run_id": run_id,
+        "summary": row.get("summary") or None,
+        "urgency": _normalize_mitigation_urgency(row.get("urgency")),
+        "recommendations": json.loads(row.get("recommendation") or "[]"),
+        "cost_delta": row.get("cost_delta") or None,
+        "rag_citations": json.loads(row.get("rag_citations_json") or "[]"),
+        "india_sourcing_recommendations": json.loads(row.get("india_sourcing_json") or "[]"),
+    }
 
 
 def insert_llm_call_log(**kwargs) -> None:
@@ -636,7 +717,7 @@ def fetch_ops_kpi_priors(sku: str, region: str) -> Optional[Dict[str, float]]:
 def ensure_risk_classification_table() -> None:
     """Create risk_classifications table if it doesn't exist, and add
     full_result_json to pre-existing tables that predate it (ALTER TABLE
-    is a no-op-safe upgrade path — CREATE TABLE IF NOT EXISTS alone would
+    is a no-op-safe upgrade path ΓÇö CREATE TABLE IF NOT EXISTS alone would
     not add a new column to an already-existing table on disk)."""
     with get_connection() as conn:
         conn.execute(
@@ -689,7 +770,7 @@ def insert_risk_classification(
     """Persist one L4 classification run. full_result_json, when provided,
     is a serialized RiskClassificationResult (rule/distilbert/llm/judge
     signals) so a later cache-hit read (fetch_risk_classification) can
-    return the complete ensemble detail instead of rule-signal-only —
+    return the complete ensemble detail instead of rule-signal-only ΓÇö
     see risk.py's _response_from_cached_row. Rows inserted before this
     column existed simply have it NULL, and the reader falls back to the
     rule-only view for those. sku_id is None for rows whose source record
@@ -717,7 +798,7 @@ def insert_risk_classification(
 
 
 def fetch_record_by_order_id(order_id: int) -> Optional[Dict[str, Any]]:
-    """Resolve an order_id to its most recent daily_records row — the
+    """Resolve an order_id to its most recent daily_records row ΓÇö the
     (event_date, port, sku) shape risk_classifier_agent's record dict
     needs. Used by GET /api/risk-classification/{run_id} (Screen 2) to
     turn the run_id (== order_id) path param into a record before
@@ -733,7 +814,7 @@ def fetch_record_by_order_id(order_id: int) -> Optional[Dict[str, Any]]:
 def fetch_risk_classification(order_id: int) -> Optional[Dict[str, Any]]:
     """Read back the most recently persisted ensemble result for an
     order_id from risk_classifications. Returns None if this order has
-    never been classified — the caller (Screen 2's API handler) computes
+    never been classified ΓÇö the caller (Screen 2's API handler) computes
     it live in that case. Read counterpart to insert_risk_classification."""
     rows = execute_query(
         "SELECT * FROM risk_classifications WHERE order_id = ? ORDER BY id DESC LIMIT 1",
@@ -783,7 +864,7 @@ def fetch_scenario_options() -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-# ── Day 8 read helpers (Screen 1–5) ─────────────────────────────────────────
+# ΓöÇΓöÇ Day 8 read helpers (Screen 1ΓÇô5) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 _HUB_CITIES_ORDER = [
     "Hsinchu", "Osaka", "Austin", "Shanghai", "Singapore", "Rotterdam",
@@ -868,7 +949,7 @@ def fetch_live_news(limit: int = 50) -> Dict[str, Any]:
 def fetch_live_weather() -> Dict[str, Any]:
     """Read live_weather_ingest for the 6 fab hub cities (Screen 1 WeatherPanel).
 
-    Recomputes is_trigger_hub from raw_severity_score >= 7.0 — never trusts the
+    Recomputes is_trigger_hub from raw_severity_score >= 7.0 ΓÇö never trusts the
     stored is_trigger_hub column. Table: live_weather_ingest."""
     rows = execute_query(
         """
@@ -931,7 +1012,7 @@ def fetch_run_logs(run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
         status = row["status"] or "Complete"
         dur_s = (row["duration_ms"] or 0) / 1000.0
         if row["error_message"]:
-            text = f"{level}: {status} — {row['error_message']}"
+            text = f"{level}: {status} ΓÇö {row['error_message']}"
         else:
             text = f"{level}: {status} ({dur_s:.1f}s)"
         lines.append({"level": level, "text": text, "tab": tab, "source": "real"})
@@ -1114,21 +1195,56 @@ def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
     """Read mitigation_output for run_id (Screen 4 Mitigation tab).
 
     Table: mitigation_output (+ RAG trace stored in rag_query_trace_json)."""
-    rows = execute_query(
-        "SELECT * FROM mitigation_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
-        (run_id,),
-    )
-    if not rows:
-        return None
-    row = dict(rows[0])
+    ensure_schema()
+    risk_row = fetch_risk_classification_output(run_id)
+    action_row = fetch_mitigation_action_output(run_id)
+
+    if action_row is None:
+        rows = execute_query(
+            "SELECT * FROM mitigation_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+            (run_id,),
+        )
+        if not rows:
+            return None
+        row = dict(rows[0])
+        ranked_actions = json.loads(row["ranked_actions_json"])
+        return {
+            "run_id": run_id,
+            "risk_level": (risk_row or {}).get("final_label") if risk_row else None,
+            "summary": None,
+            "urgency": _normalize_mitigation_urgency(row["urgency"]),
+            "ranked_actions": ranked_actions,
+            "rag_citations": [],
+            "rag_query_trace": [],
+            "india_sourcing_recommendations": [],
+            "slack_preview": None,
+            "cost_delta": None,
+            "cost_delta_usd": None,
+        }
+
+    ranked_actions = [
+        {
+            "rank": idx + 1,
+            "text": text,
+            "citations": action_row["rag_citations"],
+        }
+        for idx, text in enumerate(action_row["recommendations"])
+    ]
+
     return {
         "run_id": run_id,
-        "urgency": row["urgency"],
-        "ranked_actions": json.loads(row["ranked_actions_json"]),
-        "rag_query_trace": json.loads(row["rag_query_trace_json"]),
-        "india_sourcing_recommendations": json.loads(row["india_sourcing_json"]),
-        "slack_preview": row["slack_preview"],
-        "cost_delta_usd": row["cost_delta_usd"],
+        "risk_level": (risk_row or {}).get("final_label") if risk_row else None,
+        "summary": action_row["summary"],
+        "urgency": _normalize_mitigation_urgency(action_row["urgency"]),
+        "ranked_actions": ranked_actions,
+        "rag_citations": action_row["rag_citations"],
+        # Assumption: the pipeline does not persist a real per-query trace.
+        # Keep this empty rather than reconstructing a fake trace from code.
+        "rag_query_trace": [],
+        "india_sourcing_recommendations": action_row["india_sourcing_recommendations"],
+        "slack_preview": None,
+        "cost_delta": action_row["cost_delta"],
+        "cost_delta_usd": None,
     }
 
 
@@ -1142,7 +1258,7 @@ def insert_risk_classification_output(
     """Persist L4's RiskClassificationResult keyed by pipeline run_id.
 
     Separate from risk_classifications (order_id-keyed, written directly by
-    risk_classifier_agent for Screen 2's historical-order lookup) — this
+    risk_classifier_agent for Screen 2's historical-order lookup) ΓÇö this
     table is the run_id-keyed snapshot for a live/demo/replay pipeline run,
     following the same pattern as simulation_output/mitigation_output."""
     ensure_schema()
@@ -1201,7 +1317,7 @@ def build_idle_agents() -> List[Dict[str, Any]]:
 
 
 def fetch_recent_completed_run_ids(limit: int = 10) -> List[Dict[str, Any]]:
-    """Recent run_ids whose L7_mitigation agent reached a terminal status —
+    """Recent run_ids whose L7_mitigation agent reached a terminal status ΓÇö
     the pool Replay mode's run picker offers (POST /run with mode="replay"
     only accepts an already-completed run_id)."""
     rows = execute_query(
@@ -1260,7 +1376,7 @@ def fetch_pipeline_status(run_id: Optional[str]) -> Optional[Dict[str, Any]]:
             continue
         status = row["status"]
         # L5/L6 are optional: run_agent_sequence() catches their exception
-        # outside agent_span(), after it already wrote "Failed-Fallback" —
+        # outside agent_span(), after it already wrote "Failed-Fallback" ΓÇö
         # translate that into "Skipped-Optional" here rather than teaching
         # agent_span() (used by every agent, required and optional alike)
         # about per-agent optionality.
@@ -1348,7 +1464,7 @@ def _percentile(values: List[float], pct: float) -> float:
 def fetch_latency_percentiles() -> List[Dict[str, Any]]:
     """P50/P90 latency_ms per agent from llm_call_log (Screen 5).
 
-    Percentiles computed in Python — sqlite3 has no PERCENTILE_CONT."""
+    Percentiles computed in Python ΓÇö sqlite3 has no PERCENTILE_CONT."""
     rows = execute_query(
         """
         SELECT agent_name, latency_ms
@@ -1407,7 +1523,7 @@ def insert_guardrail_event(
     agent: str,
     pass_count: int,
     fail_count: int,
-    reason: str = "—",
+    reason: str = "ΓÇö",
 ) -> None:
     """Insert or refresh one guardrail_events aggregate row."""
     ensure_schema()

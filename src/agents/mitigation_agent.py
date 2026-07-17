@@ -418,12 +418,17 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
         action = _rule_based_action(state, record)
 
     insert_mitigation_action(
-        record.get("event_date") or record.get("order_date", ""),
-        record.get("port", ""),
-        record.get("sku", ""),
-        state.risk_label,
-        json.dumps(action.recommendations),
-        action.cost_delta,
+        run_id=state.run_id,
+        event_date=record.get("event_date") or record.get("order_date", ""),
+        port=record.get("port", ""),
+        sku=record.get("sku", ""),
+        risk_label=state.risk_label,
+        summary=action.summary,
+        recommendations=action.recommendations,
+        urgency=action.urgency,
+        cost_delta=action.cost_delta,
+        rag_citations=action.rag_citations,
+        india_sourcing_recommendations=action.india_sourcing_recommendations,
     )
 
     if rc is not None and rc.critical_flag:

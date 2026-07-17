@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Literal
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 AgentStatus = Literal["Idle", "Running", "Complete", "Skipped-Optional", "Failed-Fallback"]
 RiskLevel = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
@@ -159,17 +159,21 @@ class SimulationResponse(BaseModel):
 class RankedAction(BaseModel):
     rank: int
     text: str
-    citations: List[str]
+    citations: List[str] = Field(default_factory=list)
 
 
 class MitigationResponse(BaseModel):
     run_id: str
-    urgency: Literal["ROUTINE", "ELEVATED", "IMMEDIATE"]
+    risk_level: RiskLevel
+    summary: Optional[str] = None
+    urgency: Literal["LOW", "MEDIUM", "HIGH", "IMMEDIATE"]
     ranked_actions: List[RankedAction]
+    rag_citations: List[str] = Field(default_factory=list)
     rag_query_trace: List[str]
     india_sourcing_recommendations: List[str]
-    slack_preview: str
-    cost_delta_usd: float
+    slack_preview: Optional[str] = None
+    cost_delta: Optional[str] = None
+    cost_delta_usd: Optional[float] = None
 
 
 class CostByAgent(BaseModel):
