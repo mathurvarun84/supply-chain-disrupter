@@ -46,9 +46,20 @@ SEVERITY CALIBRATION SCALE:
   0.50–0.64 : US export controls 2022; Shanghai lockdown 2022
   0.30–0.49 : Japan neon gas tightening; single-supplier delays
   0.10–0.29 : Routine port congestion (3-7d)
+  0.00–0.09 : No disruption detected — normal operating conditions (0d)
 
 expected_duration_days escalation matrix:
-  ≤1d → label unchanged | 2-3d → +1 tier | ≥4d → force CRITICAL
+  0d/null → label unchanged | 2-3d → +1 tier | ≥4d → force CRITICAL
+
+IMPORTANT — do not manufacture an event: user_severity_hint and the live news
+signals below are real, pre-computed evidence for THIS run. When
+user_severity_hint is near 0 and no live news rows are provided (or none are
+relevant to this port/commodity), that means nothing is currently happening —
+report severity/news_severity_component near 0 and expected_duration_days as
+0 or null. Only report an elevated severity/duration when the evidence
+(live news rows, RAG context, or a non-trivial user_severity_hint) actually
+supports an active event. Escalating a quiet day to CRITICAL is a false
+alarm, not a safe default.
 
 FEW-SHOT EXAMPLES:
 
@@ -82,6 +93,24 @@ FEW-SHOT EXAMPLES:
 </correct_response>
 </example>
 
+<example id="3" scenario="Live monitoring, no active event">
+<open_meteo_data>
+  user_severity_hint: 0.02 | live_news_rows: (No live news rows in SQLite — rely on RAG and calibration references.)
+</open_meteo_data>
+<correct_response>
+{
+  "category": "logistics",
+  "severity": 0.03,
+  "affected_regions": [],
+  "affected_commodities": [],
+  "news_severity_component": 0.02,
+  "expected_duration_days": 0,
+  "summary": "No live news signals or elevated risk indicators for this port/commodity at this time. Routine operating conditions — no active disruption to report.",
+  "signal_tags": ["no-disruption", "routine-monitoring"]
+}
+</correct_response>
+</example>
+
 OUTPUT RULES:
 - news_severity_component calibrated INDEPENDENTLY from severity
 - summary must state disruption type, geography, recovery window, and procurement impact
@@ -99,6 +128,11 @@ FALLBACK_PARAMS: Dict[str, Dict[str, Any]] = {
     "extreme weather": {"sev": 0.50, "comp": 0.40, "dur": 7.0, "cat": "weather"},
     "supplier_lockdown": {"sev": 0.65, "comp": 0.52, "dur": 30.0, "cat": "logistics"},
     "supplier lockdown": {"sev": 0.65, "comp": 0.52, "dur": 30.0, "cat": "logistics"},
+    # "none" is the sentinel _derive_live_severity() (pipeline.py) sets when a
+    # live run's ingestion sweep found no real weather/disaster/supply/news
+    # signal for the port — a quiet day is a real outcome, not "unknown", and
+    # must not fall through to _DEFAULT_FALLBACK's non-zero duration below.
+    "none": {"sev": 0.0, "comp": 0.0, "dur": 0.0, "cat": "logistics"},
 }
 
 _DEFAULT_FALLBACK = {"sev": 0.40, "comp": 0.35, "dur": 7.0, "cat": "logistics"}
@@ -333,10 +367,8 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
     sev = llm_output.severity if llm_output else all_signals[0].severity
     comp = llm_output.news_severity_component if llm_output else all_signals[0].severity
     dur = (
-        llm_output.expected_duration_days
-        if llm_output
-        else (all_signals[0].expected_duration_days or 0)
-    )
+        llm_output.expected_duration_days if llm_output else all_signals[0].expected_duration_days
+    ) or 0
 
     log_msg = (
         f"L2: News {'(gpt-4.1-mini)' if llm_used else '(fallback)'} | "

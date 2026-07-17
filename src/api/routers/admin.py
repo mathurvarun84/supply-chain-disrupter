@@ -71,6 +71,7 @@ def _run_rag_build(flush: bool) -> None:
                 get_chroma_client,
                 get_embedding_model,
                 reset_chroma_client,
+                reset_embedding_model_cache,
             )
             from src.rag.collections import (
                 COLLECTION_CHUNK_CONFIG,
@@ -78,6 +79,14 @@ def _run_rag_build(flush: bool) -> None:
                 RAG_DATA_ROOT,
                 build_collection,
             )
+
+            # A rebuild is the one place we must not trust the cached
+            # embedding function: if new weights were pushed to the same
+            # Hugging Face repo id since the process started, the
+            # name-keyed cache in rag/utils.py has no way to detect that on
+            # its own — only an explicit reset here (or a process restart)
+            # picks up the update in time for this rebuild to re-embed with it.
+            reset_embedding_model_cache()
 
             if flush and CHROMA_DIR.exists():
                 shutil.rmtree(CHROMA_DIR)

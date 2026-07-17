@@ -121,6 +121,13 @@ def ensure_schema() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_execution_log_run_id ON agent_execution_log(run_id)"
         )
+        # Migration: detail_message holds the agent's own human-readable log
+        # line (e.g. "L4: composite=0.712 final=HIGH ...") so the Live Feed
+        # documentary can show what actually happened instead of a bare
+        # "Complete (2.3s)". Predates the column on DBs built before this change.
+        aex_cols = [row["name"] for row in conn.execute("PRAGMA table_info(agent_execution_log)")]
+        if aex_cols and "detail_message" not in aex_cols:
+            conn.execute("ALTER TABLE agent_execution_log ADD COLUMN detail_message TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS forecast_output (
@@ -151,6 +158,19 @@ def ensure_schema() -> None:
             )
             """
         )
+        # Migration: revenue P10/P90 and days-to-stockout P10/50/90 were
+        # already computed by run_monte_carlo() (SimulationResult) but never
+        # persisted into this dashboard snapshot table — the Forecast &
+        # Simulation tab only ever saw P50 revenue. Predates these columns
+        # on DBs built before this change.
+        sim_cols = [row["name"] for row in conn.execute("PRAGMA table_info(simulation_output)")]
+        if sim_cols:
+            for col in (
+                "revenue_at_risk_p10_usd", "revenue_at_risk_p90_usd",
+                "days_to_stockout_p10", "days_to_stockout_p50", "days_to_stockout_p90",
+            ):
+                if col not in sim_cols:
+                    conn.execute(f"ALTER TABLE simulation_output ADD COLUMN {col} REAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS mitigation_output (
@@ -603,6 +623,30 @@ def update_agent_execution(run_id: str, agent_name: str, **kwargs) -> None:
     )
 
 
+def set_agent_execution_detail(run_id: str, agent_name: str, detail_message: str) -> None:
+    """Attach an agent's own rich log line(s) (from GlobalState.agent_logs) to its
+    most recent agent_execution_log row, so /api/live-feed/logs can surface real
+    detail — composite scores, labels, citation counts — instead of a bare
+    "Complete (2.3s)". Called from run_agent_sequence right after each agent
+    returns. Best-effort: swallows failures so a logging hiccup never breaks
+    the pipeline."""
+    try:
+        execute_non_query(
+            """
+            UPDATE agent_execution_log
+            SET detail_message = :detail_message
+            WHERE id = (
+                SELECT id FROM agent_execution_log
+                WHERE run_id = :run_id AND agent_name = :agent_name
+                ORDER BY id DESC LIMIT 1
+            )
+            """,
+            {"run_id": run_id, "agent_name": agent_name, "detail_message": detail_message},
+        )
+    except Exception:
+        pass
+
+
 def ensure_simulation_schema() -> None:
     """Create simulation_runs audit table."""
     with get_connection() as conn:
@@ -996,7 +1040,7 @@ def fetch_run_logs(run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
     Table: agent_execution_log."""
     rows = execute_query(
         """
-        SELECT agent_name, status, started_at, completed_at, duration_ms, error_message
+        SELECT agent_name, status, started_at, completed_at, duration_ms, error_message, detail_message
         FROM agent_execution_log
         WHERE run_id = ?
         ORDER BY started_at ASC, id ASC
@@ -1012,7 +1056,11 @@ def fetch_run_logs(run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
         status = row["status"] or "Complete"
         dur_s = (row["duration_ms"] or 0) / 1000.0
         if row["error_message"]:
-            text = f"{level}: {status} ΓÇö {row['error_message']}"
+            text = f"{level}: {status} — {row['error_message']}"
+        elif row["detail_message"]:
+            # The agent's own log line already starts with "L4: ..." etc, so
+            # append the timing rather than repeating the generic status.
+            text = f"{row['detail_message']} ({dur_s:.1f}s)"
         else:
             text = f"{level}: {status} ({dur_s:.1f}s)"
         lines.append({"level": level, "text": text, "tab": tab, "source": "real"})
@@ -1076,8 +1124,15 @@ def insert_forecast_output(
     categories: List[str],
     series: List[Dict[str, Any]],
 ) -> None:
-    """Persist one Prophet forecast snapshot for a pipeline run."""
+    """Persist one Prophet forecast snapshot for a pipeline run.
+
+    Idempotent by run_id (delete-then-insert rather than a UNIQUE
+    constraint, since forecast_output predates one and this avoids an
+    ALTER TABLE migration on existing DBs) so a retried snapshot call does
+    not accumulate duplicate rows for the same run_id.
+    """
     ensure_schema()
+    execute_non_query("DELETE FROM forecast_output WHERE run_id = ?", (run_id,))
     execute_non_query(
         """
         INSERT INTO forecast_output (run_id, category, categories_json, series_json)
@@ -1118,14 +1173,28 @@ def insert_simulation_output(
     revenue_at_risk_usd: float,
     alternate_route: str,
     histogram: List[Dict[str, Any]],
+    revenue_at_risk_p10_usd: Optional[float] = None,
+    revenue_at_risk_p90_usd: Optional[float] = None,
+    days_to_stockout_p10: Optional[float] = None,
+    days_to_stockout_p50: Optional[float] = None,
+    days_to_stockout_p90: Optional[float] = None,
 ) -> None:
-    """Persist one SimPy/Monte Carlo snapshot keyed by pipeline run_id."""
+    """Persist one SimPy/Monte Carlo snapshot keyed by pipeline run_id.
+
+    revenue_at_risk_p10/p90_usd and days_to_stockout_p10/50/90 are real
+    SimulationResult fields (run_monte_carlo() always computes them) that
+    were previously discarded at the pipeline_bridge boundary — None only
+    when the heuristic fallback ran (no real Monte Carlo trials) or on
+    pre-fix demo/fixture rows.
+    """
     ensure_schema()
     execute_non_query(
         """
         INSERT OR REPLACE INTO simulation_output (
-            run_id, p10, p50, p90, revenue_at_risk_usd, alternate_route, histogram_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            run_id, p10, p50, p90, revenue_at_risk_usd, alternate_route, histogram_json,
+            revenue_at_risk_p10_usd, revenue_at_risk_p90_usd,
+            days_to_stockout_p10, days_to_stockout_p50, days_to_stockout_p90
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -1135,6 +1204,11 @@ def insert_simulation_output(
             revenue_at_risk_usd,
             alternate_route,
             json.dumps(histogram),
+            revenue_at_risk_p10_usd,
+            revenue_at_risk_p90_usd,
+            days_to_stockout_p10,
+            days_to_stockout_p50,
+            days_to_stockout_p90,
         ),
     )
 
@@ -1158,6 +1232,11 @@ def fetch_simulation(run_id: str) -> Optional[Dict[str, Any]]:
         "revenue_at_risk_usd": row["revenue_at_risk_usd"],
         "alternate_route": row["alternate_route"],
         "histogram": json.loads(row["histogram_json"]),
+        "revenue_at_risk_p10_usd": row["revenue_at_risk_p10_usd"] if "revenue_at_risk_p10_usd" in row.keys() else None,
+        "revenue_at_risk_p90_usd": row["revenue_at_risk_p90_usd"] if "revenue_at_risk_p90_usd" in row.keys() else None,
+        "days_to_stockout_p10": row["days_to_stockout_p10"] if "days_to_stockout_p10" in row.keys() else None,
+        "days_to_stockout_p50": row["days_to_stockout_p50"] if "days_to_stockout_p50" in row.keys() else None,
+        "days_to_stockout_p90": row["days_to_stockout_p90"] if "days_to_stockout_p90" in row.keys() else None,
     }
 
 

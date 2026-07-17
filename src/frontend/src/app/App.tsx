@@ -9,6 +9,7 @@ import { TabPlaceholder } from "./components/TabPlaceholder";
 import { TabLiveFeed } from "./TabLiveFeed";
 import { TabRiskClassification } from "./TabRiskClassification";
 import { TabMitigationPlan } from "./TabMitigationPlan";
+import { TabForecastSimulation } from "./TabForecastSimulation";
 import { TabRagEval } from "./TabRagEval";
 import { TabObservability } from "./TabObservability";
 import { TabAdmin } from "./TabAdmin";
@@ -177,6 +178,8 @@ export default function App() {
               <TabRiskClassification />
             ) : activeTab === 3 ? (
               <TabMitigationPlan runId={activeRunId ?? pipeline?.run_id} />
+            ) : activeTab === 2 ? (
+              <TabForecastSimulation runId={activeRunId ?? pipeline?.run_id} />
             ) : activeTab === 4 ? (
               <TabObservability />
             ) : activeTab === 5 ? (

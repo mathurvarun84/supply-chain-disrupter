@@ -148,7 +148,7 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
     run_id is taken from payload["run_id"] when present; a new UUID is minted
     otherwise so observability works even when called directly without one.
     """
-    from src.utils.db_utils import ensure_schema, ensure_sku_id_columns
+    from src.utils.db_utils import ensure_schema, ensure_sku_id_columns, set_agent_execution_detail
     from src.utils.observability import agent_span, pipeline_trace
 
     ensure_schema()
@@ -158,24 +158,41 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
     mode: str = payload.get("mode", "live")
     source_type: str = payload.get("source_type", "unknown")
 
+    def _capture_detail(agent_name: str, state_before: GlobalState, state_after: GlobalState) -> None:
+        """Persist whatever this agent just appended to agent_logs onto its
+        agent_execution_log row, so the Live Feed documentary shows the
+        agent's own detail (composite scores, labels, citation counts) instead
+        of a bare "L4: Complete (2.3s)"."""
+        new_lines = state_after.agent_logs[len(state_before.agent_logs):]
+        if new_lines:
+            set_agent_execution_detail(run_id, agent_name, " | ".join(new_lines))
+
     with pipeline_trace(run_id, mode=mode, source_type=source_type) as trace:
         state = GlobalState(run_id=run_id, langfuse_trace=trace)
 
         with agent_span(trace, run_id, "L1_ingestion") as span:
             state = state.model_copy(update={"langfuse_span": span})
+            prev = state
             state = _merge_state(state, _l1_node(payload)(state))
+            _capture_detail("L1_ingestion", prev, state)
 
         with agent_span(trace, run_id, "L2_news") as span:
             state = state.model_copy(update={"langfuse_span": span})
+            prev = state
             state = _merge_state(state, news_event_analysis_agent(state))
+            _capture_detail("L2_news", prev, state)
 
         with agent_span(trace, run_id, "L3_weather") as span:
             state = state.model_copy(update={"langfuse_span": span})
+            prev = state
             state = _merge_state(state, weather_risk_monitoring_agent(state))
+            _capture_detail("L3_weather", prev, state)
 
         with agent_span(trace, run_id, "L4_risk_classifier") as span:
             state = state.model_copy(update={"langfuse_span": span})
+            prev = state
             state = _merge_state(state, risk_classifier_agent(state))
+            _capture_detail("L4_risk_classifier", prev, state)
 
         # L5/L6 are optional. Exceptions must propagate INTO agent_span so it
         # can write Failed-Fallback before re-raising; we catch the re-raise outside
@@ -183,27 +200,35 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
         try:
             with agent_span(trace, run_id, "L5_forecast") as span:
                 state = state.model_copy(update={"langfuse_span": span})
+                prev = state
                 state = _merge_state(state, demand_forecasting_agent(state))
+                _capture_detail("L5_forecast", prev, state)
         except Exception as exc:
             logger.warning("L5 skipped: %s", exc)
             state = state.model_copy(
                 update={"agent_logs": state.agent_logs + [f"L5: SKIPPED - {exc}"]}
             )
+            set_agent_execution_detail(run_id, "L5_forecast", f"L5: SKIPPED - {exc}")
 
         try:
             with agent_span(trace, run_id, "L6_simulation") as span:
                 state = state.model_copy(update={"langfuse_span": span})
+                prev = state
                 state = _merge_state(state, simulation_agent(state))
+                _capture_detail("L6_simulation", prev, state)
         except Exception as exc:
             logger.warning("L6 skipped: %s", exc)
             state = state.model_copy(
                 update={"agent_logs": state.agent_logs + [f"L6: SKIPPED - {exc}"]}
             )
+            set_agent_execution_detail(run_id, "L6_simulation", f"L6: SKIPPED - {exc}")
 
         # Match the compiled graph: L7 is required. The span records a failure,
         # and the exception then surfaces to the caller.
         with agent_span(trace, run_id, "L7_mitigation") as span:
             state = state.model_copy(update={"langfuse_span": span})
+            prev = state
             state = _merge_state(state, mitigation_recommendation_agent(state))
+            _capture_detail("L7_mitigation", prev, state)
 
     return state

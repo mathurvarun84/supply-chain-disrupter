@@ -18,6 +18,7 @@ dependencies = [
     "pyyaml>=6,<7",
     "requests>=2.31,<3",
     "sentence-transformers>=5,<6",
+    "statsmodels>=0.14,<1",
     "streamlit>=1.40,<2",
     "langgraph>=1.2,<2",
     "yfinance>=0.2,<2",
