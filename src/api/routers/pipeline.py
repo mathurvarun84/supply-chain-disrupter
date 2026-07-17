@@ -63,7 +63,16 @@ def _build_live_payload(run_id: str) -> Dict[str, Any]:
     manual scenario form and scripts/seed_demo_run.py already use (a real
     (port, sku, event_date) baseline from daily_records) — mode="live" only
     changes what data_ingestion_agent_v2 prefers (live enrichment overlay
-    over the historical record), not the payload shape itself."""
+    over the historical record), not the payload shape itself.
+
+    severity/shock_duration_days/disruption_type are NOT set here: at this
+    point (the request handler, before the BackgroundTask runs) no live
+    news/weather sweep has happened yet for this port, so there is nothing
+    real to base them on. _derive_live_severity() fills them in inside
+    _run_and_snapshot(), after _refresh_live_data() has actually ingested
+    something — see that function for why this used to be a hardcoded
+    severity=0.6/shock_duration_days=14 stub that faked a disruption on
+    every live run regardless of what was actually detected."""
     options = fetch_scenario_options()
     if not options:
         raise HTTPException(
@@ -75,16 +84,66 @@ def _build_live_payload(run_id: str) -> Dict[str, Any]:
         "run_id": run_id,
         "mode": "live",
         "source_type": "LIVE",
-        "disruption_type": "geopolitical",
         "affected_port": scenario["port"],
         "affected_route": f"{scenario['port']} to Singapore",
-        "severity": 0.6,
-        "shock_duration_days": 14,
         "recovery_window_days": 90,
         "synthetic_ratio": 0.0,
         "event_date": scenario["event_date"],
         "sku": scenario["sku"],
     }
+
+
+def _derive_live_severity(port: str) -> tuple[float, int, str]:
+    """Derive EventMetadata's (severity, shock_duration_days, disruption_type)
+    from the live_enrichment row _refresh_live_data() just wrote for `port`,
+    instead of assuming a disruption exists. Returns (0.0, 0, "none") when
+    there's no live signal for this port yet — a quiet ingestion sweep is a
+    real, valid outcome and should not be reported as a moderate/critical
+    event.
+
+    Reuses the exact same normalization bounds/formula the Risk Classifier
+    (L4) uses for its geo/supply/freight components, so a "live" run's
+    baseline severity is consistent with how L4 would score the same raw
+    signals — just computed here before L1/L4 run, from whatever
+    _refresh_live_data() fetched a moment earlier.
+
+    shock_duration_days is always 0: real event duration comes from L2's
+    news_event_analysis_agent parsing actual article text
+    (NewsRiskSignal.expected_duration_days), which the Risk Classifier's
+    escalation matrix (_max_duration_days) already reads independently of
+    this payload field. Faking a duration here would double-count or
+    override that real signal with a guess.
+    """
+    from src.agents.data_ingestion_agent import DataIngestionAgent
+    from src.agents.risk_classifier_agent.agent import _get_norm_bounds, _norm
+
+    enrichment = DataIngestionAgent().run_for_record(port=port, sku="", signal_date="")
+    if not enrichment:
+        return 0.0, 0, "none"
+
+    bounds = _get_norm_bounds()
+    weather = enrichment.get("weather_severity_live")
+    natural_disaster = enrichment.get("natural_disaster_risk_live")
+    supply_idx = enrichment.get("supply_disruption_index_live")
+    news_count = enrichment.get("disruption_news_count_live")
+
+    geo = max(
+        max(0.0, min(1.0, float(weather))) if weather is not None else 0.0,
+        _norm(float(natural_disaster), *bounds["natural_disaster_risk"]) if natural_disaster is not None else 0.0,
+    )
+    supply = _norm(float(supply_idx), *bounds["supply_disruption_index"]) if supply_idx is not None else 0.0
+    news = _norm(float(news_count), *bounds["disruption_news_count"]) if news_count is not None else 0.0
+
+    severity = round(0.45 * geo + 0.35 * supply + 0.20 * news, 3)
+
+    if geo >= supply and geo >= news:
+        disruption_type = "extreme weather"
+    elif supply >= news:
+        disruption_type = "chip shortage"
+    else:
+        disruption_type = "geopolitical"
+
+    return severity, 0, disruption_type
 
 
 def _build_payload(request: PipelineRunRequest, run_id: str) -> Dict[str, Any]:
@@ -125,6 +184,12 @@ def _run_and_snapshot(run_id: str, payload: Dict[str, Any]) -> None:
         _RUN_PHASE[run_id] = "Fetching live news & weather data…"
         try:
             _refresh_live_data()
+            severity, shock_duration_days, disruption_type = _derive_live_severity(
+                payload["affected_port"]
+            )
+            payload["severity"] = severity
+            payload["shock_duration_days"] = shock_duration_days
+            payload["disruption_type"] = disruption_type
         finally:
             _RUN_PHASE.pop(run_id, None)
     final_state = run_agent_sequence(payload)

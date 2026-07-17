@@ -5,12 +5,12 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException
 
-from src.api.fixtures import FORECAST_CATEGORIES, FORECAST_SERIES, RUN_ID_FIXTURE
 from src.api.schemas import (
     ForecastResponse,
     ForecastWeekPoint,
     SkuForecastResponse,
 )
+from src.utils.db_utils import fetch_forecast
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -127,14 +127,28 @@ def get_sku_forecast(sku_id: str):
 
 
 @router.get("/{run_id}", response_model=ForecastResponse)
-def get_forecast(run_id: str, category: str = "Laptops"):
-    """Legacy category-level fixture endpoint (retained for dashboard compatibility).
+def get_forecast(run_id: str, category: str | None = None):
+    """Screen 3 Forecast tab — reads forecast_output for a pipeline run_id.
+
+    Was: a hardcoded fixture ignoring run_id/category entirely. Now reads
+    the real L5 snapshot written by pipeline_bridge.persist_forecast_output()
+    for this run_id. "category" is the real winning ops_kpi sku_id (e.g.
+    "SKU014"), not one of the four Laptops/Phones/Headphones/Speakers
+    fixture names the frontend selector was built against — ops_kpi has no
+    product-category dimension, so a true category rollup isn't available
+    from real data (documented scope cut, not silently reconciled).
+
+    404 only if this run_id has never been snapshotted at all; a run where
+    L5 was Skipped-Optional still has a row (fallback series, category=
+    "Skipped-Optional") written by persist_forecast_output(), so this never
+    404s for a known run_id.
 
     Defined last so it does not shadow the static /sku/* routes above.
     """
-    return ForecastResponse(
-        run_id=run_id,
-        category=category,
-        categories=FORECAST_CATEGORIES,
-        series=FORECAST_SERIES,
-    )
+    snapshot = fetch_forecast(run_id, category)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No forecast snapshot for run_id={run_id}. Run the pipeline first.",
+        )
+    return ForecastResponse(**snapshot)

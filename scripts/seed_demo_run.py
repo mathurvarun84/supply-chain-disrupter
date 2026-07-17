@@ -13,7 +13,6 @@ checklist. Does NOT expose an HTTP endpoint — Day 9 wires the live Run button.
 from __future__ import annotations
 
 import json
-import math
 import sys
 import uuid
 from pathlib import Path
@@ -23,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.agents.langgraph_engine import run_agent_sequence
 from src.agents.pipeline_bridge import (
+    persist_forecast_output,
     persist_mitigation_output,
     persist_risk_classification_output,
     persist_simulation_output,
@@ -33,11 +33,8 @@ from src.utils.db_utils import (
     execute_query,
     fetch_guardrail_events,
     fetch_scenario_options,
-    insert_forecast_output,
     insert_guardrail_event,
 )
-
-FORECAST_CATEGORIES = ["Laptops", "Phones", "Headphones", "Speakers"]
 
 
 def _pick_scenario() -> dict:
@@ -47,37 +44,6 @@ def _pick_scenario() -> dict:
         raise RuntimeError("No scenario options — run: python scripts/build_databases.py")
     best = max(options, key=lambda r: r.get("history_points") or 0)
     return best
-
-
-def _persist_forecast(run_id: str, state) -> None:
-    """Map L5 Prophet output to forecast_output table."""
-    fr = state.forecast_result
-    record = state.active_record or {}
-    baseline_demand = float(record.get("demand") or 1000.0)
-
-    if fr and fr.prophet_forecast:
-        points = fr.prophet_forecast[-30:]
-        series = []
-        for i, pt in enumerate(points):
-            baseline = round(baseline_demand + math.sin(i * 0.3) * 40 + i * 1.5)
-            adjusted = round(max(0.0, float(pt.get("yhat") or baseline)))
-            series.append({"day": f"D+{i + 1}", "baseline": baseline, "adjusted": adjusted})
-    else:
-        series = [
-            {
-                "day": f"D+{i + 1}",
-                "baseline": round(1000 + math.sin(i * 0.3) * 40 + i * 1.5),
-                "adjusted": round(max(380, 1000 - (i * 42 if i < 8 else 336))),
-            }
-            for i in range(30)
-        ]
-
-    insert_forecast_output(
-        run_id=run_id,
-        category="Laptops",
-        categories=FORECAST_CATEGORIES,
-        series=series,
-    )
 
 
 def _seed_guardrails_if_empty() -> None:
@@ -129,7 +95,7 @@ def main() -> None:
 
     state = run_agent_sequence(payload)
 
-    _persist_forecast(run_id, state)
+    persist_forecast_output(run_id, state)
     persist_risk_classification_output(run_id, state)
     persist_simulation_output(run_id, state)
     persist_mitigation_output(run_id, state)

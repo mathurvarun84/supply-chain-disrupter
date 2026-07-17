@@ -114,8 +114,11 @@ def _build_forecast_demands(state: GlobalState, horizon_days: int, fallback: flo
         return []
     demands: List[float] = []
     for point in state.forecast_result.prophet_forecast[:horizon_days]:
-        yhat = float(point.get("yhat", fallback))
-        demands.append(max(0.0, yhat))
+        # Real L5 output (DemandForecastingAgent v3) uses "demand_disrupted";
+        # "yhat" is kept as a fallback for the legacy stub shape some tests
+        # still construct directly.
+        value = point.get("demand_disrupted", point.get("yhat", fallback))
+        demands.append(max(0.0, float(value)))
     while len(demands) < horizon_days:
         demands.append(demands[-1] if demands else fallback)
     return demands[:horizon_days]
@@ -140,7 +143,7 @@ def build_simulation_params(state: GlobalState, trials: int, seed: Optional[int]
     if unit_price <= 0:
         unit_price = 1.0
 
-    severity = float(meta.severity) if meta else 0.5
+    severity = float(meta.severity) if meta else 0.0
     shock_duration = int(meta.shock_duration_days) if meta else 0
     recovery_window = int(meta.recovery_window_days) if meta else 60
     disruption_type = (meta.disruption_type if meta else "unknown").lower()
