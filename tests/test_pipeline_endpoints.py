@@ -223,7 +223,7 @@ def test_status_reflects_real_agent_execution_log_rows(seeded_db):
     assert body["is_complete"] is False  # L7 never ran
 
 
-def test_snapshot_writes_l4_l6_l7_but_never_l5(seeded_db):
+def test_snapshot_writes_l4_l5_l6_l7(seeded_db):
     from src.utils.db_utils import fetch_forecast, fetch_mitigation, fetch_risk_classification_output, fetch_simulation
 
     state = _fake_final_state("bridge-run-1")
@@ -231,28 +231,64 @@ def test_snapshot_writes_l4_l6_l7_but_never_l5(seeded_db):
         "src.agents.pipeline_bridge.insert_mitigation_output"
     ) as mock_mit, patch(
         "src.agents.pipeline_bridge.insert_risk_classification_output"
-    ) as mock_risk:
+    ) as mock_risk, patch(
+        "src.agents.pipeline_bridge.insert_forecast_output"
+    ) as mock_forecast:
         snapshot_run_outputs("bridge-run-1", state)
         mock_sim.assert_called_once()
         mock_mit.assert_called_once()
         mock_risk.assert_called_once()
+        mock_forecast.assert_called_once()
 
-    # Real (non-mocked) run: rows actually land in the L4/L6/L7 tables...
+    # Real (non-mocked) run: rows actually land in the L4/L5/L6/L7 tables.
     snapshot_run_outputs("bridge-run-2", state)
     assert fetch_risk_classification_output("bridge-run-2") is not None
     assert fetch_simulation("bridge-run-2") is not None
     assert fetch_mitigation("bridge-run-2") is not None
-    # ...and forecast_output (L5) is never touched by the bridge at all.
-    assert fetch_forecast("bridge-run-2") is None
+    # forecast_result was None (L5 skipped) on _fake_final_state, so this is
+    # the fixture-shaped fallback row, not a fabricated real forecast.
+    forecast = fetch_forecast("bridge-run-2")
+    assert forecast is not None
+    assert forecast["category"] == "Skipped-Optional"
 
 
 def test_forecast_endpoint_handles_l5_skip_gracefully(seeded_db):
-    """L5 is out of scope for the bridge — a run_id with no forecast_output
-    row (the common case, since snapshot_run_outputs never writes one)
-    returns Day 8's existing 404 contract, not a 500."""
+    """A run_id that was never snapshotted at all (pipeline never ran for
+    it) still 404s, not a 500. A run_id where L5 itself was Skipped-Optional
+    now has a fallback row (see test_snapshot_writes_l4_l5_l6_l7) and does
+    not hit this path."""
     resp = client.get("/api/forecast/run-with-no-forecast")
     assert resp.status_code in (200, 404)
     assert resp.status_code != 500
+
+
+def test_simulation_snapshot_carries_revenue_and_days_to_stockout_spread(seeded_db):
+    """revenue_at_risk_p10/p90_usd and days_to_stockout_p10/50/90 are real
+    SimulationResult fields the Monte Carlo engine always computes; they
+    were previously dropped at the pipeline_bridge boundary. Assert they
+    survive the persist_simulation_output -> fetch_simulation round trip."""
+    from src.utils.db_utils import fetch_simulation
+
+    state = _fake_final_state("bridge-run-3")
+    state.simulation_result = SimulationResult(
+        stockout_probability_pct=42.0,
+        expected_inventory_gap_pct=10.0,
+        alternate_route="Cape of Good Hope",
+        revenue_impact_usd_p10=50_000.0,
+        revenue_impact_usd_p50=150_000.0,
+        revenue_impact_usd_p90=400_000.0,
+        days_to_stockout_p10=3.0,
+        days_to_stockout_p50=7.0,
+        days_to_stockout_p90=14.0,
+    )
+    snapshot_run_outputs("bridge-run-3", state)
+
+    sim = fetch_simulation("bridge-run-3")
+    assert sim["revenue_at_risk_p10_usd"] == 50_000.0
+    assert sim["revenue_at_risk_p90_usd"] == 400_000.0
+    assert sim["days_to_stockout_p10"] == 3.0
+    assert sim["days_to_stockout_p50"] == 7.0
+    assert sim["days_to_stockout_p90"] == 14.0
 
 
 def test_simulation_endpoint_reads_real_data_not_fixture(seeded_db):

@@ -8,6 +8,7 @@ import { AgentNode } from "./components/AgentNode";
 import { TabPlaceholder } from "./components/TabPlaceholder";
 import { TabLiveFeed } from "./TabLiveFeed";
 import { TabRiskClassification } from "./TabRiskClassification";
+import { TabForecastSimulation } from "./TabForecastSimulation";
 import { TabRagEval } from "./TabRagEval";
 import { TabObservability } from "./TabObservability";
 import { TabAdmin } from "./TabAdmin";
@@ -174,6 +175,8 @@ export default function App() {
               <TabLiveFeed runId={activeRunId ?? pipeline?.run_id} onTabSwitch={setActiveTab} />
             ) : activeTab === 1 ? (
               <TabRiskClassification />
+            ) : activeTab === 2 ? (
+              <TabForecastSimulation runId={activeRunId ?? pipeline?.run_id} />
             ) : activeTab === 4 ? (
               <TabObservability />
             ) : activeTab === 5 ? (

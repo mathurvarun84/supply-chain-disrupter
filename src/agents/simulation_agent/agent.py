@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any, Dict
@@ -28,14 +29,19 @@ def simulation_agent(state: GlobalState) -> Dict[str, Any]:
         raise ValueError("Active record and config are required for simulation.")
 
     trials = _trial_count(state)
-    seed = hash(
-        (
-            state.active_record.get("event_date"),
-            state.active_record.get("port"),
-            state.active_record.get("sku"),
+    # Bug fix: Python's hash() is salted per-process (PYTHONHASHSEED), so the
+    # same record produced a different seed — and therefore a different
+    # Monte Carlo distribution — every time the process restarted, breaking
+    # Demo/Replay reproducibility. sha256 is stable across processes.
+    seed_key = "|".join(
+        [
+            str(state.active_record.get("event_date")),
+            str(state.active_record.get("port")),
+            str(state.active_record.get("sku")),
             state.event_metadata.disruption_type if state.event_metadata else "",
-        )
-    ) % (2**31)
+        ]
+    )
+    seed = int(hashlib.sha256(seed_key.encode("utf-8")).hexdigest(), 16) % (2**31)
 
     try:
         params = build_simulation_params(state, trials=trials, seed=seed)

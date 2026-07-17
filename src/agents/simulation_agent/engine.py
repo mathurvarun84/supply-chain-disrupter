@@ -62,8 +62,19 @@ def _daily_demand(
         shock = 1.0 + params.severity * 0.5 + params.composite_score * 0.3
         demand *= shock
 
-    yield_loss = 1.0 - min(0.3, (params.defect_rate_pct / 100.0) * rng.uniform(0.8, 1.2))
-    return max(0.0, demand * yield_loss)
+    return demand
+
+
+def _defective_unit_loss(params: SimulationParams, rng: np.random.Generator) -> float:
+    """Fraction of an inbound shipment lost to defects (0.0-0.3).
+
+    Applied to *supply*, not demand: a higher Defect_Rate_Pct means fewer of
+    the units that arrive are actually sellable, which shrinks usable
+    inventory and therefore *increases* stockout risk. (Bug fix: this was
+    previously applied as a multiplier on demand, which made higher defect
+    rates paradoxically lower the modeled risk.)
+    """
+    return min(0.3, (params.defect_rate_pct / 100.0) * rng.uniform(0.8, 1.2))
 
 
 # Monkey-patch helper avoided — use inline drop logic instead
@@ -89,6 +100,9 @@ def _run_single_trial(params: SimulationParams, rng: np.random.Generator) -> Tup
         supplier_reliable = bool(rng.random() < reliability)
 
     inbound_qty = params.incoming_supply if supplier_reliable else 0.0
+    # Defects consume part of the inbound shipment before it becomes usable
+    # inventory — see _defective_unit_loss().
+    inbound_qty *= 1.0 - _defective_unit_loss(params, rng)
     inventory = params.initial_inventory
     inbound_schedule = {lead_time: inbound_qty}
 

@@ -124,6 +124,34 @@ def resolve_embedding_model_name() -> str:
     return DEFAULT_EMBEDDING_REPO
 
 
+# Process-wide cache, keyed by resolved model_name — constructing
+# SentenceTransformerEmbeddingFunction for our fine-tuned Hugging Face repo
+# takes ~35-40s the first time (a Hub round-trip to resolve the repo
+# revision, not the local weight load, which finishes in under a second).
+# query_chroma_rag() previously called get_embedding_model() fresh on every
+# single query (3x per L2 news-agent call alone), so whichever agent ran the
+# first RAG lookup in a process silently ate that cold-start cost and looked
+# slow. Keyed by name (not a single global) so EMBEDDING_MODEL_PATH changing
+# mid-process still resolves to a distinct, freshly-built instance.
+_embedding_model_cache: Dict[str, SentenceTransformerEmbeddingFunction] = {}
+_embedding_model_lock = threading.Lock()
+
+
+def reset_embedding_model_cache() -> None:
+    """Drop cached embedding function instances.
+
+    Call this after pushing new weights to the *same* Hugging Face repo id
+    (a same-name update the name-keyed cache above can't detect on its own)
+    — e.g. from the admin "Rebuild RAG corpus" action, which is the moment a
+    stale in-memory model would otherwise keep re-embedding with old weights
+    for the rest of the process's life. A plain env var change to
+    EMBEDDING_MODEL_PATH does not need this: it resolves to a new cache key
+    automatically.
+    """
+    with _embedding_model_lock:
+        _embedding_model_cache.clear()
+
+
 def get_embedding_model() -> SentenceTransformerEmbeddingFunction:
     """
     Return the ChromaDB embedding function wrapping the resolved bi-encoder.
@@ -131,11 +159,20 @@ def get_embedding_model() -> SentenceTransformerEmbeddingFunction:
     The bi-encoder encodes each chunk and query into a fixed 384-dim vector
     with L2-normalization (`normalize_embeddings=True`) so cosine distance in
     ChromaDB matches semantic similarity. Used at ingest (upsert) and query time.
+
+    Cached per resolved model_name for the life of the process — see
+    reset_embedding_model_cache() to force a reload.
     """
     configure_hf_hub_ssl()
     model_name = resolve_embedding_model_name()
+
+    with _embedding_model_lock:
+        cached = _embedding_model_cache.get(model_name)
+    if cached is not None:
+        return cached
+
     try:
-        return SentenceTransformerEmbeddingFunction(
+        model = SentenceTransformerEmbeddingFunction(
             model_name=model_name,
             normalize_embeddings=True,
         )
@@ -148,10 +185,19 @@ def get_embedding_model() -> SentenceTransformerEmbeddingFunction:
             exc,
             EMBEDDING_MODEL,
         )
-        return SentenceTransformerEmbeddingFunction(
+        model_name = EMBEDDING_MODEL
+        with _embedding_model_lock:
+            cached = _embedding_model_cache.get(model_name)
+        if cached is not None:
+            return cached
+        model = SentenceTransformerEmbeddingFunction(
             model_name=EMBEDDING_MODEL,
             normalize_embeddings=True,
         )
+
+    with _embedding_model_lock:
+        _embedding_model_cache[model_name] = model
+    return model
 
 
 def _chunk_text(text: str) -> List[str]:

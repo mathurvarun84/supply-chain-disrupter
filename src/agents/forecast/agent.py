@@ -559,12 +559,13 @@ class DemandForecastingAgent:
         future_baseline["risk_score_composite"] = calm_risk
 
         scenario = disruption_scenario or {}
+        disruption_flag = scenario.get("disruption_flag", 1)
         disrupted_risk = scenario.get(
             "risk_score_composite",
             float(weekly_p.loc[weekly_p["Disruption_Flag"] == 1, "risk_score_composite"].quantile(0.75)),
         )
         future_disrupted = future.copy()
-        future_disrupted["Disruption_Flag"] = scenario.get("disruption_flag", 1)
+        future_disrupted["Disruption_Flag"] = disruption_flag
         future_disrupted["risk_score_composite"] = disrupted_risk
 
         if "chip_price_index" in regressors:
@@ -578,30 +579,57 @@ class DemandForecastingAgent:
         # ---- 3. Fit the SELECTED model on full history and predict ----
         if winner == "prophet":
             baseline_model = self._fit_prophet(weekly_p, regressors=[])
-            disrupted_model = self._fit_prophet(weekly_p, regressors=regressors)
             fc_baseline = baseline_model.predict(future_baseline[["ds"]])["yhat"].clip(lower=0).values
-            fc_disrupted = disrupted_model.predict(future_disrupted[["ds"] + regressors])["yhat"].clip(lower=0).values
         elif winner == "sarimax":
             baseline_fit = self._fit_sarimax(weekly_p, exog_cols=[])
-            disrupted_fit = self._fit_sarimax(weekly_p, exog_cols=sarimax_exog)
             fc_baseline = baseline_fit.forecast(steps=FORECAST_HORIZON_WEEKS).clip(lower=0).values
+        elif winner == "timegpt":
+            fc_baseline = self._fit_predict_timegpt(weekly_p, future_baseline, timegpt_exog)
+            if fc_baseline is None:
+                logs.append("TimeGPT production call failed -- falling back to SARIMAX")
+                winner = "sarimax (timegpt fallback)"
+                baseline_fit = self._fit_sarimax(weekly_p, exog_cols=[])
+                fc_baseline = baseline_fit.forecast(steps=FORECAST_HORIZON_WEEKS).clip(lower=0).values
+        else:
+            raise ValueError(f"Unexpected winning model: {winner}")
+
+        # disruption_flag == 0 means L4 did not classify this as a real event
+        # (HIGH/CRITICAL) — see demand_forecasting_agent() in this module.
+        # Running a separately-fit "disrupted" model here is misleading in
+        # that case: baseline/disrupted are two independently fitted models
+        # (not the same model evaluated at two input points), so they diverge
+        # from model-estimation differences alone, even fed matching inputs —
+        # confirmed empirically, feeding the disrupted scenario the exact
+        # calm-period composite still produced a large "drop" on this SKU's
+        # own history. Reporting the disrupted series as identical to
+        # baseline is the only way to guarantee a non-event shows ~0% change.
+        if not disruption_flag:
+            fc_disrupted = np.array(fc_baseline, dtype=float)
+        elif winner == "prophet":
+            disrupted_model = self._fit_prophet(weekly_p, regressors=regressors)
+            fc_disrupted = disrupted_model.predict(future_disrupted[["ds"] + regressors])["yhat"].clip(lower=0).values
+        elif winner in ("sarimax", "sarimax (timegpt fallback)"):
+            disrupted_fit = self._fit_sarimax(weekly_p, exog_cols=sarimax_exog)
             fc_disrupted = disrupted_fit.forecast(
                 steps=FORECAST_HORIZON_WEEKS, exog=future_disrupted[sarimax_exog]
             ).clip(lower=0).values
         elif winner == "timegpt":
-            fc_baseline = self._fit_predict_timegpt(weekly_p, future_baseline, timegpt_exog)
             fc_disrupted = self._fit_predict_timegpt(weekly_p, future_disrupted, timegpt_exog)
-            if fc_baseline is None or fc_disrupted is None:
-                logs.append("TimeGPT production call failed -- falling back to SARIMAX")
-                baseline_fit = self._fit_sarimax(weekly_p, exog_cols=[])
+            if fc_disrupted is None:
+                logs.append("TimeGPT disrupted-scenario call failed -- falling back to SARIMAX")
+                winner = "sarimax (timegpt fallback)"
                 disrupted_fit = self._fit_sarimax(weekly_p, exog_cols=sarimax_exog)
-                fc_baseline = baseline_fit.forecast(steps=FORECAST_HORIZON_WEEKS).clip(lower=0).values
                 fc_disrupted = disrupted_fit.forecast(
                     steps=FORECAST_HORIZON_WEEKS, exog=future_disrupted[sarimax_exog]
                 ).clip(lower=0).values
-                winner = "sarimax (timegpt fallback)"
         else:
             raise ValueError(f"Unexpected winning model: {winner}")
+
+        if not disruption_flag:
+            logs.append(
+                "L5: disruption_flag=0 (L4 did not classify HIGH/CRITICAL) — "
+                "reporting baseline-only forecast, no separately-fit disrupted scenario."
+            )
 
         demand_forecast = [
             {
@@ -621,13 +649,20 @@ class DemandForecastingAgent:
         )
 
         # ---- 5. Stockout probability ----
-        clf = self._train_stockout_classifier(weekly_p)
-        if clf is not None:
-            stockout_prob = float(
-                clf.predict_proba([[future_disrupted["Disruption_Flag"].iloc[0], disrupted_risk]])[0][1]
-            )
-        else:
+        # disruption_flag == 0: same reasoning as the forecast above — go
+        # straight to the historical base rate rather than the classifier,
+        # which would otherwise be scored against the live composite
+        # (disrupted_risk) as if this were a real event.
+        if not disruption_flag:
             stockout_prob = float(weekly_p["Stockout_Flag"].mean())
+        else:
+            clf = self._train_stockout_classifier(weekly_p)
+            if clf is not None:
+                stockout_prob = float(
+                    clf.predict_proba([[future_disrupted["Disruption_Flag"].iloc[0], disrupted_risk]])[0][1]
+                )
+            else:
+                stockout_prob = float(weekly_p["Stockout_Flag"].mean())
         stockout_prob = round(stockout_prob, 3)
         logs.append(f"Stockout probability under disruption scenario: {stockout_prob}")
 
@@ -701,23 +736,46 @@ def demand_forecasting_agent(state: Any) -> Dict[str, Any]:
     if state.active_record is None:
         raise ValueError("L5: active_record is required for demand forecasting.")
 
-    sku_id: Optional[str] = (
-        state.active_record.get("sku_id")    # daily_records VIEW: SKU001-style crosswalk key
-        or state.active_record.get("SKU_ID")
-        or state.active_record.get("sku")    # fallback: product_name alias — not an ops_kpi ID
-    )
+    handoff = getattr(state, "forecast_handoff", None)
+    sku_id: Optional[str] = None
+    if handoff is not None and getattr(handoff, "sku_id", None):
+        sku_id = str(handoff.sku_id)
+    if not sku_id:
+        sku_id = (
+            state.active_record.get("sku_id")    # daily_records VIEW: SKU001-style crosswalk key
+            or state.active_record.get("SKU_ID")
+            or state.active_record.get("sku")    # fallback: product_name alias — not an ops_kpi ID
+        )
     if not sku_id:
         return {
             "agent_logs": state.agent_logs + [
-                "L5: SKIPPED – no sku_id found in active_record."
+                "L5: SKIPPED – no sku_id found in active_record or forecast_handoff."
             ],
         }
 
-    # Build disruption scenario from L4 risk classification result if available
+    # Build disruption scenario from L4 risk-classifier handoff/result if available.
+    # Prefer the explicit handoff payload so L5 uses the exact SKU and composite that
+    # L4 selected for this event, rather than reusing a different record from the state.
+    #
+    # disruption_flag was previously hardcoded to 1 here unconditionally — Disruption_Flag
+    # is a binary regressor the Prophet/SARIMAX/TimeGPT models learned a separate
+    # coefficient for (see future_disrupted["Disruption_Flag"] at line ~567 and the
+    # stockout classifier's predict_proba() call at line ~627), independent of
+    # risk_score_composite's own coefficient. Forcing it to 1 injected the model's
+    # learned "a real disruption happened this week" effect into every run's
+    # demand_disrupted/stockout_prob output, even when L4 classified the run LOW —
+    # the same "always assume a disruption" bug already fixed in L2/L6. Only treat
+    # it as a real disruption for the tiers L4 itself treats as one (matches
+    # risk_classifier_agent._gather_rag_citations()'s HIGH/CRITICAL threshold).
     disruption_scenario: Optional[dict] = None
-    if state.risk_classification is not None:
+    if handoff is not None:
         disruption_scenario = {
-            "disruption_flag": 1,
+            "disruption_flag": 1 if handoff.risk_label in ("HIGH", "CRITICAL") else 0,
+            "risk_score_composite": float(handoff.risk_score_composite),
+        }
+    elif state.risk_classification is not None:
+        disruption_scenario = {
+            "disruption_flag": 1 if state.risk_classification.final_label in ("HIGH", "CRITICAL") else 0,
             "risk_score_composite": float(state.risk_classification.composite_score),
         }
 
@@ -747,6 +805,11 @@ def demand_forecasting_agent(state: Any) -> Dict[str, Any]:
     from src.agents.state import ForecastResult as _PydanticForecastResult
     forecast_result = _PydanticForecastResult(
         demand_forecast=result.demand_forecast,
+        # legacy alias — must mirror demand_forecast so downstream readers
+        # (L6's _build_forecast_demands(), pipeline_bridge's forecast
+        # snapshot) that still key off prophet_forecast see real data
+        # instead of silently falling back to a fabricated series.
+        prophet_forecast=result.demand_forecast,
         expected_drop_pct=result.expected_drop_pct or 0.0,
         sku_id=result.sku_id,
         model_selected=result.model_selected,

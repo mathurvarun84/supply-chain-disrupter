@@ -154,6 +154,14 @@ class SimulationResponse(BaseModel):
     revenue_at_risk_usd: float
     alternate_route: str
     histogram: List[SimulationBucket]
+    # Real SimulationResult fields (run_monte_carlo() always computes these);
+    # Optional because pre-fix demo/fixture rows and the heuristic fallback
+    # path don't populate them.
+    revenue_at_risk_p10_usd: Optional[float] = None
+    revenue_at_risk_p90_usd: Optional[float] = None
+    days_to_stockout_p10: Optional[float] = None
+    days_to_stockout_p50: Optional[float] = None
+    days_to_stockout_p90: Optional[float] = None
 
 
 class RankedAction(BaseModel):

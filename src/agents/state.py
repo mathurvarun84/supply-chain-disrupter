@@ -177,10 +177,14 @@ class NewsAnalysisLLMOutput(BaseModel):
         le=1.0,
         description="Freight/logistics proxy for composite formula (weight 0.15).",
     )
-    expected_duration_days: float = Field(
-        ...,
-        gt=0,
-        description="Days until primary disruption resolves. Drives escalation matrix.",
+    expected_duration_days: Optional[float] = Field(
+        None,
+        ge=0,
+        description=(
+            "Days until primary disruption resolves. Drives escalation matrix. "
+            "0 or null when the evidence does not support an active disruption "
+            "— do not invent a positive duration when there is none."
+        ),
     )
     summary: str = Field(
         ...,
