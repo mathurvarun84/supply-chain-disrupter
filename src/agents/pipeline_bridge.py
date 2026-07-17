@@ -37,9 +37,9 @@ from src.utils.db_utils import (
 
 URGENCY_MAP = {
     "CRITICAL": "IMMEDIATE",
-    "HIGH": "ELEVATED",
-    "MODERATE": "ROUTINE",
-    "ROUTINE": "ROUTINE",
+    "HIGH": "HIGH",
+    "MEDIUM": "MEDIUM",
+    "LOW": "LOW",
 }
 
 
@@ -167,43 +167,28 @@ def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
     """Map L7 MitigationAction to mitigation_output. Mirrors
     scripts/seed_demo_run.py's original _persist_mitigation exactly."""
     action = state.mitigation_action
-    record = state.active_record or {}
-    risk_label = state.risk_label or "HIGH"
-    composite = state.risk_score_composite or 0.0
 
     if action is None:
         insert_mitigation_output(
             run_id=run_id,
-            urgency="ELEVATED",
+            urgency="LOW",
             ranked_actions=[],
             rag_query_trace=[],
             india_sourcing_recommendations=[],
-            slack_preview=f"No mitigation generated for run_id {run_id}",
+            slack_preview="",
             cost_delta_usd=0.0,
         )
         return
 
-    urgency = URGENCY_MAP.get(action.urgency.upper(), "ROUTINE")
+    urgency = URGENCY_MAP.get(action.urgency.upper(), action.urgency)
     ranked = [
         {"rank": idx + 1, "text": text, "citations": action.rag_citations or []}
         for idx, text in enumerate(action.recommendations)
     ]
-    rag_trace = [
-        "historical_disruption_lookup → historical_precedents (always fired)",
-        "export_control_check → export_control_corpus (export_control_norm > 0.50)",
-        "india_sourcing_query → india_sourcing_corpus (geo_component > 0.40)",
-    ]
-    india_recs = action.india_sourcing_recommendations or [
-        "Kaynes Technology — Mysuru, Karnataka — PLI Semiconductor Scheme",
-        "Tata Electronics — Dholera SEZ, Gujarat — ISM Greenfield 2024",
-    ]
-    slack_preview = (
-        f"{risk_label} disruption detected\n"
-        f"Risk: {composite:.3f} | {record.get('port', 'unknown')}\n"
-        f"Actions: {len(ranked)} ranked · India sourcing ✓\n"
-        f"run_id: {run_id}"
-    )
-    cost_delta = 180_000.0 if urgency == "IMMEDIATE" else 50_000.0
+    rag_trace = []
+    india_recs = action.india_sourcing_recommendations or []
+    slack_preview = ""
+    cost_delta = 0.0
 
     insert_mitigation_output(
         run_id=run_id,
