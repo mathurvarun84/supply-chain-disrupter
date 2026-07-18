@@ -31,6 +31,7 @@ from src.utils.db_utils import (
     build_stockout_histogram,
     insert_forecast_output,
     insert_mitigation_output,
+    insert_mitigation_rag_trace,
     insert_risk_classification_output,
     insert_simulation_output,
 )
@@ -163,10 +164,53 @@ def persist_simulation_output(run_id: str, state: GlobalState) -> None:
     )
 
 
+def _build_slack_preview(run_id: str, state: GlobalState, action) -> str:
+    """Read-only preview text for a Slack alert — never actually sent from here
+    (the real webhook POST, if any, fires elsewhere in the pipeline). Only
+    called when slack_alert_fired is True."""
+    record = state.active_record or {}
+    metadata = state.event_metadata
+    port_or_sku = record.get("port") or record.get("sku") or "affected shipment"
+    disruption = metadata.disruption_type if metadata else state.risk_label
+    top_action = action.recommendations[0] if action.recommendations else "See mitigation plan."
+    return (
+        f"\U0001F514 [{action.urgency}] {disruption} risk — {port_or_sku} (run {run_id})\n"
+        f"{action.summary}\n"
+        f"Top action: {top_action}"
+    )
+
+
+def _mitigation_window_text(state: GlobalState) -> "str | None":
+    """Derived from EventMetadata's shock_duration_days/recovery_window_days —
+    genuine values already computed by the Scenario Analyzer/L2-L3 agents, not
+    a new estimate. None when no event metadata exists for this run (e.g.
+    rule-based-only replay with no live event context)."""
+    metadata = state.event_metadata
+    if metadata is None:
+        return None
+    return (
+        f"{metadata.shock_duration_days}-day disruption window, "
+        f"{metadata.recovery_window_days}-day recovery"
+    )
+
+
 def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
     """Map L7 MitigationAction to mitigation_output. Mirrors
-    scripts/seed_demo_run.py's original _persist_mitigation exactly."""
+    scripts/seed_demo_run.py's original _persist_mitigation exactly, plus the
+    slack_alert_fired hard rule and the structured RAG trace this bridge now
+    also captures (see mitigation_rag_trace table / insert_mitigation_rag_trace).
+
+    slack_alert_fired is computed HERE from state.risk_classification.critical_flag
+    — the same server-derived rule used for slack_should_fire on the risk
+    classification endpoint (src/api/routers/risk.py) — and is never read off
+    the LLM's mitigation output, which has no opinion on Slack at all.
+    """
     action = state.mitigation_action
+    rc = state.risk_classification
+    slack_alert_fired = bool(rc.critical_flag) if rc is not None else False
+    mitigation_window = _mitigation_window_text(state)
+
+    insert_mitigation_rag_trace(run_id, state.mitigation_rag_trace)
 
     if action is None:
         insert_mitigation_output(
@@ -177,6 +221,8 @@ def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
             india_sourcing_recommendations=[],
             slack_preview="",
             cost_delta_usd=0.0,
+            slack_alert_fired=slack_alert_fired,
+            mitigation_window=mitigation_window,
         )
         return
 
@@ -185,19 +231,26 @@ def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
         {"rank": idx + 1, "text": text, "citations": action.rag_citations or []}
         for idx, text in enumerate(action.recommendations)
     ]
-    rag_trace = []
     india_recs = action.india_sourcing_recommendations or []
-    slack_preview = ""
-    cost_delta = 0.0
+    slack_preview = _build_slack_preview(run_id, state, action) if slack_alert_fired else ""
+
+    sim = state.simulation_result
+    cost_delta_usd = (
+        round(float(sim.revenue_impact_usd_p50), 2)
+        if sim is not None and sim.revenue_impact_usd_p50 is not None
+        else 0.0
+    )
 
     insert_mitigation_output(
         run_id=run_id,
         urgency=urgency,
         ranked_actions=ranked,
-        rag_query_trace=rag_trace,
+        rag_query_trace=[],
         india_sourcing_recommendations=india_recs,
         slack_preview=slack_preview,
-        cost_delta_usd=cost_delta,
+        cost_delta_usd=cost_delta_usd,
+        slack_alert_fired=slack_alert_fired,
+        mitigation_window=mitigation_window,
     )
 
 

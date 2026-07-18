@@ -33,7 +33,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from opentelemetry import trace as ot_trace
 from trulens.apps.app import TruApp, instrument
@@ -143,8 +143,18 @@ class _PipelineRunner:
         return state.risk_label or "UNKNOWN"
 
 
-def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
-    """Drop-in replacement for run_agent_graph(payload) with TruLens tracing."""
+def run_with_trulens(payload: Dict[str, Any], capture: Optional[Dict[str, Any]] = None) -> GlobalState:
+    """Drop-in replacement for run_agent_graph(payload) with TruLens tracing.
+
+    `capture`, when passed, is filled in-place with this run's
+    node_latencies_ms and cost_summary (the same values recorded onto the
+    TruLens span — see _PipelineRunner.run()) before returning, so a caller
+    that needs them (the TruLens tab's capture-run endpoint,
+    src/api/routers/trulens.py) doesn't have to re-query TruLens's own
+    OTEL-backed SQLite schema for data this process already computed.
+    Purely additive — omitting `capture` preserves the exact prior signature
+    every existing caller (cli.py, evaluation/trulens_runner.py) relies on.
+    """
     from src.utils.db_utils import ensure_schema
 
     # Neither run_agent_graph() nor build_agent_graph() calls ensure_schema()
@@ -182,4 +192,7 @@ def run_with_trulens(payload: Dict[str, Any]) -> GlobalState:
         logger.warning("TruLens flush failed (non-blocking) for run_id=%s: %s", run_id, exc)
 
     assert runner.final_state is not None
+    if capture is not None:
+        capture["node_latencies_ms"] = runner.node_latencies_ms
+        capture["cost_summary"] = _aggregate_llm_cost(runner.llm_calls)
     return runner.final_state

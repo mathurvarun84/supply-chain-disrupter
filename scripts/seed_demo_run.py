@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-One-time offline seed: run L1–L7 via run_agent_sequence() and persist outputs
+One-time offline seed: run L1–L7 via run_pipeline() and persist outputs
 to forecast_output, simulation_output, mitigation_output, guardrail_events.
 
 Usage:
@@ -20,7 +20,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.agents.langgraph_engine import run_agent_sequence
+from src.agents.langgraph_engine import run_pipeline
 from src.agents.pipeline_bridge import (
     persist_forecast_output,
     persist_mitigation_output,
@@ -93,7 +93,7 @@ def main() -> None:
         f"date={scenario['event_date']} history={scenario.get('history_points')}"
     )
 
-    state = run_agent_sequence(payload)
+    state = run_pipeline(payload)
 
     persist_forecast_output(run_id, state)
     persist_risk_classification_output(run_id, state)

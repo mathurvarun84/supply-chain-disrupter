@@ -186,6 +186,38 @@ def ensure_schema() -> None:
             )
             """
         )
+        # Migration: slack_alert_fired/mitigation_window were added after the
+        # original mitigation_output table shipped — backfill on older DBs.
+        # slack_alert_fired is the server-computed hard rule (== risk critical_flag
+        # at persist time), never trusted from the LLM output.
+        mo_cols = [row["name"] for row in conn.execute("PRAGMA table_info(mitigation_output)")]
+        if mo_cols:
+            if "slack_alert_fired" not in mo_cols:
+                conn.execute(
+                    "ALTER TABLE mitigation_output ADD COLUMN slack_alert_fired INTEGER NOT NULL DEFAULT 0"
+                )
+            if "mitigation_window" not in mo_cols:
+                conn.execute("ALTER TABLE mitigation_output ADD COLUMN mitigation_window TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mitigation_rag_trace (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                query_name TEXT NOT NULL,
+                query_text TEXT NOT NULL,
+                fired INTEGER NOT NULL,
+                fire_condition TEXT NOT NULL,
+                collection TEXT,
+                source_file TEXT,
+                similarity_score REAL,
+                chunk_snippet TEXT,
+                created_at_utc TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mitigation_rag_trace_run_id ON mitigation_rag_trace(run_id)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS risk_classification_output (
@@ -1248,15 +1280,23 @@ def insert_mitigation_output(
     india_sourcing_recommendations: List[str],
     slack_preview: str,
     cost_delta_usd: float,
+    slack_alert_fired: bool = False,
+    mitigation_window: Optional[str] = None,
 ) -> None:
-    """Persist full MitigationResponse payload for a pipeline run_id."""
+    """Persist full MitigationResponse payload for a pipeline run_id.
+
+    slack_alert_fired must already be server-computed from risk.critical_flag by
+    the caller (see pipeline_bridge.persist_mitigation_output) — this function
+    just stores whatever it's given, it doesn't recompute the rule.
+    """
     ensure_schema()
     execute_non_query(
         """
         INSERT OR REPLACE INTO mitigation_output (
             run_id, urgency, ranked_actions_json, rag_query_trace_json,
-            india_sourcing_json, slack_preview, cost_delta_usd
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            india_sourcing_json, slack_preview, cost_delta_usd,
+            slack_alert_fired, mitigation_window
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -1266,64 +1306,229 @@ def insert_mitigation_output(
             json.dumps(india_sourcing_recommendations),
             slack_preview,
             cost_delta_usd,
+            int(slack_alert_fired),
+            mitigation_window,
         ),
     )
 
 
-def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
-    """Read mitigation_output for run_id (Screen 4 Mitigation tab).
+def insert_mitigation_rag_trace(run_id: str, trace: List[Dict[str, Any]]) -> None:
+    """Persist L7's structured per-query RAG trace (one row per retrieved chunk,
+    or a single chunk-less row for a query that produced no chunks / didn't fire).
 
-    Table: mitigation_output (+ RAG trace stored in rag_query_trace_json)."""
+    `trace` is the mitigation_rag_trace list built by
+    build_mitigation_context_structured() and threaded through GlobalState —
+    see state.mitigation_rag_trace. Replaces any prior rows for this run_id so a
+    retried BackgroundTask dispatch doesn't duplicate the trace.
+    """
+    ensure_schema()
+    execute_non_query("DELETE FROM mitigation_rag_trace WHERE run_id = ?", (run_id,))
+    rows = []
+    for query in trace:
+        chunks = query.get("chunks") or []
+        if not chunks:
+            rows.append((
+                run_id,
+                query["query_name"],
+                query["query_text"],
+                int(query["fired"]),
+                query["fire_condition"],
+                None,
+                None,
+                None,
+                None,
+            ))
+        else:
+            for chunk in chunks:
+                rows.append((
+                    run_id,
+                    query["query_name"],
+                    query["query_text"],
+                    int(query["fired"]),
+                    query["fire_condition"],
+                    chunk.get("collection"),
+                    chunk.get("source_file"),
+                    chunk.get("similarity_score"),
+                    chunk.get("snippet"),
+                ))
+    if rows:
+        execute_many(
+            """
+            INSERT INTO mitigation_rag_trace (
+                run_id, query_name, query_text, fired, fire_condition,
+                collection, source_file, similarity_score, chunk_snippet
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def fetch_mitigation_rag_trace(run_id: str) -> List[Dict[str, Any]]:
+    """Read L7's structured RAG trace back into 3 fixed query_name-grouped entries.
+
+    Always returns exactly 3 entries in fixed order (historical_disruption_lookup,
+    export_control_check, india_sourcing_query) when any rows exist for run_id,
+    each carrying its retrieved_chunks list (empty when fired=False or no chunks
+    came back) — this is what the Screen 4 RAG Query Trace panel renders."""
+    ensure_schema()
+    order = ["historical_disruption_lookup", "export_control_check", "india_sourcing_query"]
+    rows = execute_query(
+        "SELECT * FROM mitigation_rag_trace WHERE run_id = ? ORDER BY id ASC",
+        (run_id,),
+    )
+    if not rows:
+        # No trace persisted for this run (predates trace capture, or the LLM+RAG
+        # path never ran) — still return the fixed 3 rows rather than an empty
+        # list, so the UI can show *why* nothing fired instead of a blank panel.
+        return [
+            {
+                "query_name": name,
+                "query_text": "",
+                "fired": False,
+                "fire_condition": "No RAG trace persisted for this run.",
+                "retrieved_chunks": [],
+            }
+            for name in order
+        ]
+    by_query: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        r = dict(row)
+        name = r["query_name"]
+        entry = by_query.setdefault(name, {
+            "query_name": name,
+            "query_text": r["query_text"],
+            "fired": bool(r["fired"]),
+            "fire_condition": r["fire_condition"],
+            "retrieved_chunks": [],
+        })
+        if r["source_file"] is not None:
+            entry["retrieved_chunks"].append({
+                "collection": r["collection"],
+                "source_file": r["source_file"],
+                "similarity_score": r["similarity_score"],
+                "snippet": r["chunk_snippet"],
+            })
+    return [by_query[name] for name in order if name in by_query]
+
+
+_ACTION_TYPE_KEYWORDS: List[tuple] = [
+    ("INDIA-SOURCING", ("india", "pli", "ism", "dixon", "tata", "kaynes", "osat", "dholera")),
+    ("SOURCING", ("supplier", "sourc", "diversif", "vendor", "procure", "allocation")),
+    ("ROUTING", ("reroute", "route", "freight", "carrier", "shipment", "lane", "port", "logistics")),
+    ("INVENTORY", ("safety stock", "inventory", "buffer stock", "stock level")),
+    ("FINANCIAL", ("cost", "budget", "spend", "premium", "expedite")),
+    ("MONITOR", ("monitor", "confirm", "review", "watch", "notify")),
+]
+
+
+def _infer_action_type(text: str) -> str:
+    """Heuristic keyword classifier over an already-generated action's text.
+
+    Deliberately does NOT touch L7's prompt/output schema (out of scope per
+    project convention) — this only labels text the agent already produced,
+    so it can never change what L7 recommends."""
+    lowered = text.lower()
+    for label, keywords in _ACTION_TYPE_KEYWORDS:
+        if any(kw in lowered for kw in keywords):
+            return label
+    return "MONITOR"
+
+
+def _parse_citation(raw: str) -> Dict[str, str]:
+    """Split a "<collection>: <source_file>" citation string (the format
+    mitigation_agent.py's LLM output always uses, per its few-shot examples)
+    into structured fields. Falls back to collection="unknown" for citations
+    that don't follow the convention rather than guessing."""
+    if ":" in raw:
+        collection, _, source_file = raw.partition(":")
+        return {"collection": collection.strip(), "source_file": source_file.strip()}
+    return {"collection": "unknown", "source_file": raw.strip()}
+
+
+# Inverse of pipeline_bridge.URGENCY_MAP — used only as a fallback when no
+# risk_classification_output snapshot row exists for this run_id (e.g. an
+# older/partial run), so the endpoint can still return a valid risk_level
+# instead of 500ing on a None literal.
+_RISK_LEVEL_FROM_URGENCY = {"IMMEDIATE": "CRITICAL", "HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW"}
+
+
+def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
+    """Read mitigation_output + mitigation_actions + mitigation_rag_trace for
+    run_id (Screen 4 Mitigation tab).
+
+    mitigation_output is the run_id-keyed dashboard snapshot (urgency, slack
+    rule outcome, cost delta, mitigation window) written by
+    pipeline_bridge.persist_mitigation_output(); mitigation_actions is the
+    native agent-persistence table (richer per-action recommendations/
+    citations) written directly by mitigation_agent.py. Both are read and
+    merged here — see docs/ARCHITECTURE.md for the native-vs-dashboard-table
+    split this project uses throughout."""
     ensure_schema()
     risk_row = fetch_risk_classification_output(run_id)
     action_row = fetch_mitigation_action_output(run_id)
+    trace = fetch_mitigation_rag_trace(run_id)
+
+    snapshot_rows = execute_query(
+        "SELECT * FROM mitigation_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    )
+    snapshot = dict(snapshot_rows[0]) if snapshot_rows else None
+
+    if action_row is None and snapshot is None:
+        return None
+
+    slack_alert_fired = bool(snapshot["slack_alert_fired"]) if snapshot else False
+    slack_preview = (snapshot.get("slack_preview") or None) if snapshot else None
+    mitigation_window = (snapshot.get("mitigation_window") or None) if snapshot else None
+    cost_delta_usd = (
+        snapshot["cost_delta_usd"] if snapshot and snapshot["cost_delta_usd"] not in (None, 0.0) else None
+    )
 
     if action_row is None:
-        rows = execute_query(
-            "SELECT * FROM mitigation_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
-            (run_id,),
-        )
-        if not rows:
-            return None
-        row = dict(rows[0])
-        ranked_actions = json.loads(row["ranked_actions_json"])
+        ranked_actions = [
+            {**a, "action_type": _infer_action_type(a["text"]), "citations": []}
+            for a in json.loads(snapshot["ranked_actions_json"])
+        ]
+        urgency = _normalize_mitigation_urgency(snapshot["urgency"])
         return {
             "run_id": run_id,
-            "risk_level": (risk_row or {}).get("final_label") if risk_row else None,
+            "risk_level": (risk_row or {}).get("final_label") or _RISK_LEVEL_FROM_URGENCY.get(urgency, "LOW"),
             "summary": None,
-            "urgency": _normalize_mitigation_urgency(row["urgency"]),
+            "urgency": urgency,
+            "mitigation_window": mitigation_window,
             "ranked_actions": ranked_actions,
-            "rag_citations": [],
-            "rag_query_trace": [],
-            "india_sourcing_recommendations": [],
-            "slack_preview": None,
+            "rag_query_trace": trace,
+            "india_sourcing_recommendations": json.loads(snapshot["india_sourcing_json"]),
+            "slack_alert_fired": slack_alert_fired,
+            "slack_preview": slack_preview,
             "cost_delta": None,
-            "cost_delta_usd": None,
+            "cost_delta_usd": cost_delta_usd,
         }
 
     ranked_actions = [
         {
             "rank": idx + 1,
             "text": text,
-            "citations": action_row["rag_citations"],
+            "action_type": _infer_action_type(text),
+            "citations": [_parse_citation(c) for c in action_row["rag_citations"]],
         }
         for idx, text in enumerate(action_row["recommendations"])
     ]
 
+    urgency = _normalize_mitigation_urgency(action_row["urgency"])
     return {
         "run_id": run_id,
-        "risk_level": (risk_row or {}).get("final_label") if risk_row else None,
+        "risk_level": (risk_row or {}).get("final_label") or _RISK_LEVEL_FROM_URGENCY.get(urgency, "LOW"),
         "summary": action_row["summary"],
-        "urgency": _normalize_mitigation_urgency(action_row["urgency"]),
+        "urgency": urgency,
+        "mitigation_window": mitigation_window,
         "ranked_actions": ranked_actions,
-        "rag_citations": action_row["rag_citations"],
-        # Assumption: the pipeline does not persist a real per-query trace.
-        # Keep this empty rather than reconstructing a fake trace from code.
-        "rag_query_trace": [],
+        "rag_query_trace": trace,
         "india_sourcing_recommendations": action_row["india_sourcing_recommendations"],
-        "slack_preview": None,
+        "slack_alert_fired": slack_alert_fired,
+        "slack_preview": slack_preview,
         "cost_delta": action_row["cost_delta"],
-        "cost_delta_usd": None,
+        "cost_delta_usd": cost_delta_usd,
     }
 
 
@@ -1541,20 +1746,28 @@ def _percentile(values: List[float], pct: float) -> float:
 
 
 def fetch_latency_percentiles() -> List[Dict[str, Any]]:
-    """P50/P90 latency_ms per agent from llm_call_log (Screen 5).
+    """P50/P90/P99 duration_ms per agent from agent_execution_log (Screen 5).
 
-    Percentiles computed in Python ΓÇö sqlite3 has no PERCENTILE_CONT."""
+    Sourced from agent_execution_log rather than llm_call_log: every agent
+    (L1-L7) gets an agent_span() row on every run regardless of whether it
+    calls an LLM, while llm_call_log only ever has rows for the 4 stages
+    that call OpenAI (L2/L3/L4/L7 — and L4 as two separate sub-agent names
+    at that) — so L1/L5/L6 were always silently absent from this panel.
+    Grouping by _AGENT_LEVEL_MAP's canonical L1..L7 label instead of the raw
+    agent_name also merges L4's llm_signal/judge sub-agents into one L4
+    bucket. Percentiles computed in Python — sqlite3 has no PERCENTILE_CONT."""
     rows = execute_query(
         """
-        SELECT agent_name, latency_ms
-        FROM llm_call_log
-        WHERE latency_ms IS NOT NULL
-        ORDER BY agent_name, latency_ms
+        SELECT agent_name, duration_ms
+        FROM agent_execution_log
+        WHERE duration_ms IS NOT NULL
+        ORDER BY agent_name, duration_ms
         """
     )
     buckets: Dict[str, List[float]] = {}
     for row in rows:
-        buckets.setdefault(row["agent_name"], []).append(float(row["latency_ms"]) / 1000.0)
+        label = _AGENT_LEVEL_MAP.get(row["agent_name"], row["agent_name"])
+        buckets.setdefault(label, []).append(float(row["duration_ms"]) / 1000.0)
 
     result = []
     for agent, values in sorted(buckets.items()):
@@ -1563,6 +1776,7 @@ def fetch_latency_percentiles() -> List[Dict[str, Any]]:
                 "agent": agent,
                 "p50": round(_percentile(values, 0.50), 3),
                 "p90": round(_percentile(values, 0.90), 3),
+                "p99": round(_percentile(values, 0.99), 3),
             }
         )
     return result

@@ -80,12 +80,20 @@ export function TabMitigationPlan({ runId }: { runId?: string }) {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {data.slack_alert_fired && (
+              <span className="text-[10px] font-semibold uppercase tracking-wider rounded-pill border border-risk-critical/40 bg-risk-critical/10 px-2 py-1 text-risk-critical">
+                🔔 Slack Alert FIRED
+              </span>
+            )}
             <RiskBadge level={riskLevel} pulse={riskLevel === "CRITICAL"} size="sm" />
             <span className="text-[10px] font-mono rounded-pill border border-border bg-background px-2 py-1 text-muted-strong">
               run_id {data.run_id}
             </span>
           </div>
         </div>
+        {data.mitigation_window && (
+          <div className="mt-2 text-[11px] text-muted-foreground">Mitigation window: {data.mitigation_window}</div>
+        )}
         {data.summary && (
           <p className="mt-3 max-w-4xl text-sm leading-6 text-foreground">{data.summary}</p>
         )}

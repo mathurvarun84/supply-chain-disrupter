@@ -360,6 +360,13 @@ class GlobalState(BaseModel):
     forecast_result: Optional[ForecastResult] = None
     simulation_result: Optional[SimulationResult] = None
     mitigation_action: Optional[MitigationAction] = None
+    # Structured per-query RAG trace from L7's build_mitigation_context_structured()
+    # call — always 3 entries (historical/export-control/india) when the LLM+RAG
+    # path ran; empty when it didn't (no OpenAI key, rule-based fallback used).
+    # Consumed by pipeline_bridge.persist_mitigation_output() for the Screen 4
+    # RAG Query Trace panel; not part of MitigationAction because it's retrieval
+    # metadata, not an agent recommendation.
+    mitigation_rag_trace: List[Dict[str, Any]] = Field(default_factory=list)
     agent_logs: List[str] = Field(default_factory=list)
     news_analysis_llm: Optional[NewsAnalysisLLMOutput] = None
     weather_risk_llm: Optional[WeatherRiskLLMOutput] = None

@@ -461,28 +461,35 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
     mode = "replay" if is_replay else "live"
 
     # ── Component computation ─────────────────────────────────────────────────
-    if mode == "replay":
+    # An active Scenario Analyzer simulation (a real disruption_type, not the
+    # Screen 2 "historical_replay" sentinel set by _build_minimal_state in
+    # src/api/routers/risk.py) must move the composite score, not just the
+    # label. Every lite_master row already carries a precomputed composite
+    # (ETL fills all rows), so mode == "replay" is true for nearly every
+    # simulated order too -- freezing composite_score there made every
+    # simulation against a historical order show the same dataset ground-truth
+    # number regardless of the scenario's severity/duration.
+    is_simulated_scenario = (
+        state.event_metadata is not None
+        and state.event_metadata.disruption_type != "historical_replay"
+    )
+
+    sdi = record.get("supply_disruption_index")
+    if mode == "live" and sdi is None:
+        sdi = _fetch_sdi_from_semiconductor_signals(record.get("year"))
+
+    components = _compute_components(
+        live_weather_severity=state.live_weather_severity,
+        natural_disaster_risk=record.get("natural_disaster_risk"),
+        supply_disruption_index=sdi,
+        news_signals=state.news_signals,
+        defect_rate_pct=record.get("defect_rate_pct"),
+        order_region=record.get("order_region"),
+    )
+
+    if mode == "replay" and not is_simulated_scenario:
         composite_score = float(stored_composite)
-        components = _compute_components(
-            live_weather_severity=state.live_weather_severity,
-            natural_disaster_risk=record.get("natural_disaster_risk"),
-            supply_disruption_index=record.get("supply_disruption_index"),
-            news_signals=state.news_signals,
-            defect_rate_pct=record.get("defect_rate_pct"),
-            order_region=record.get("order_region"),
-        )
     else:
-        sdi = record.get("supply_disruption_index")
-        if sdi is None:
-            sdi = _fetch_sdi_from_semiconductor_signals(record.get("year"))
-        components = _compute_components(
-            live_weather_severity=state.live_weather_severity,
-            natural_disaster_risk=record.get("natural_disaster_risk"),
-            supply_disruption_index=sdi,
-            news_signals=state.news_signals,
-            defect_rate_pct=record.get("defect_rate_pct"),
-            order_region=record.get("order_region"),
-        )
         composite_score = _composite_from_components(components)
 
     # ── Label derivation ──────────────────────────────────────────────────────

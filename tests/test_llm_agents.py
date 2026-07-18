@@ -269,6 +269,52 @@ _EMPTY_RAG_CONTEXT = (
     "(India Sourcing (ISM/PLI): No relevant chunks retrieved)"
 )
 
+_FAKE_RAG_TRACE = [
+    {
+        "query_name": "historical_disruption_lookup",
+        "query_text": "fake query",
+        "fired": True,
+        "fire_condition": "Always queried",
+        "chunks": [{
+            "collection": "historical_precedents",
+            "source_file": "red_sea_disruption_2023_2024.txt",
+            "similarity_score": 0.3,
+            "snippet": "Houthi attacks forced Asia-Europe container traffic to reroute.",
+        }],
+    },
+    {
+        "query_name": "export_control_check",
+        "query_text": "",
+        "fired": False,
+        "fire_condition": "Fires only when export_control_level is in the top quartile",
+        "chunks": [],
+    },
+    {
+        "query_name": "india_sourcing_query",
+        "query_text": "fake query",
+        "fired": True,
+        "fire_condition": "Always queried",
+        "chunks": [{
+            "collection": "india_sourcing_corpus",
+            "source_file": "cg_power_kaynes_osat_india.txt",
+            "similarity_score": 0.32,
+            "snippet": "CG Power-Kaynes OSAT joint venture in India.",
+        }],
+    },
+]
+
+_EMPTY_RAG_TRACE = [
+    {
+        "query_name": name,
+        "query_text": "",
+        "fired": name != "export_control_check",
+        "fire_condition": "Always queried" if name != "export_control_check" else
+                           "Fires only when export_control_level is in the top quartile",
+        "chunks": [],
+    }
+    for name in ("historical_disruption_lookup", "export_control_check", "india_sourcing_query")
+]
+
 
 def test_mitigation_agent_llm_success():
     """Mitigation agent uses GPT-4o + RAG output when the LLM call succeeds."""
@@ -288,7 +334,7 @@ def test_mitigation_agent_llm_success():
         india_sourcing_recommendations=["CG Power-Kaynes OSAT (India) as back-end alternate."],
     )
     with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+        with patch("src.agents.mitigation_agent.build_mitigation_context_structured", return_value=(_FAKE_RAG_CONTEXT, _FAKE_RAG_TRACE)):
             with patch("src.agents.mitigation_agent.call_openai_structured", return_value=mock_output):
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
@@ -327,7 +373,7 @@ def test_mitigation_agent_llm_failure_falls_back():
 
     state = _mitigation_state()
     with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+        with patch("src.agents.mitigation_agent.build_mitigation_context_structured", return_value=(_FAKE_RAG_CONTEXT, _FAKE_RAG_TRACE)):
             with patch(
                 "src.agents.mitigation_agent.call_openai_structured",
                 side_effect=RuntimeError("rate limit"),
@@ -346,7 +392,7 @@ def test_mitigation_agent_skips_llm_when_no_rag_chunks_retrieved():
 
     state = _mitigation_state()
     with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_EMPTY_RAG_CONTEXT):
+        with patch("src.agents.mitigation_agent.build_mitigation_context_structured", return_value=(_EMPTY_RAG_CONTEXT, _EMPTY_RAG_TRACE)):
             with patch("src.agents.mitigation_agent.call_openai_structured") as mock_call:
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
@@ -371,7 +417,7 @@ def test_mitigation_agent_drops_fabricated_citation():
         india_sourcing_recommendations=[],
     )
     with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+        with patch("src.agents.mitigation_agent.build_mitigation_context_structured", return_value=(_FAKE_RAG_CONTEXT, _FAKE_RAG_TRACE)):
             with patch("src.agents.mitigation_agent.call_openai_structured", return_value=fabricated_output):
                 with patch("src.agents.mitigation_agent.insert_mitigation_action"):
                     result = mitigation_recommendation_agent(state)
@@ -398,7 +444,7 @@ def test_mitigation_agent_clamps_under_escalated_urgency_for_critical_risk():
         india_sourcing_recommendations=[],
     )
     with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+        with patch("src.agents.mitigation_agent.build_mitigation_context_structured", return_value=(_FAKE_RAG_CONTEXT, _FAKE_RAG_TRACE)):
             with patch(
                 "src.agents.mitigation_agent.call_openai_structured", return_value=under_escalated_output
             ):
@@ -440,7 +486,7 @@ def test_mitigation_agent_clamps_under_escalated_urgency_for_tail_risk():
         india_sourcing_recommendations=[],
     )
     with patch("src.agents.mitigation_agent.has_openai_api_key", return_value=True):
-        with patch("src.agents.mitigation_agent.build_mitigation_context", return_value=_FAKE_RAG_CONTEXT):
+        with patch("src.agents.mitigation_agent.build_mitigation_context_structured", return_value=(_FAKE_RAG_CONTEXT, _FAKE_RAG_TRACE)):
             with patch(
                 "src.agents.mitigation_agent.call_openai_structured", return_value=under_escalated_output
             ):

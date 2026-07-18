@@ -359,6 +359,21 @@ def test_observability_verdicts_from_db(seeded_db):
     assert len(resp.json()) >= 1
 
 
+def test_observability_latency_includes_non_llm_agents_and_p99(seeded_db):
+    """L1/L5/L6 never call an LLM, so llm_call_log has no rows for them —
+    latency must come from agent_execution_log (which every agent writes to)
+    so they still show up here, each with a p99 field."""
+    resp = client.get("/api/observability/latency")
+    assert resp.status_code == 200
+    body = resp.json()
+    agents = {row["agent"] for row in body}
+    assert "L1" in agents
+    assert "L4" in agents
+    for row in body:
+        assert "p99" in row
+        assert row["p99"] >= row["p50"]
+
+
 def test_guardrail_events_returns_seeded_rows(seeded_db):
     resp = client.get("/api/guardrails/events")
     assert resp.status_code == 200

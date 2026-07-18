@@ -17,7 +17,7 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 from src.agents.state import GlobalState, MitigationAction, MitigationLLMOutput
-from src.rag.retriever import build_mitigation_context
+from src.rag.retriever import build_mitigation_context_structured
 from src.utils.db_utils import insert_mitigation_action
 from src.utils.openai_utils import (
     MODEL_REASONING,
@@ -205,6 +205,20 @@ def _validate_citations(citations: List[str], known_sources: Set[str]) -> List[s
     return [c for c in citations if any(src in c.lower() for src in known_sources)]
 
 
+def _skipped_rag_trace(reason: str) -> List[Dict[str, Any]]:
+    """Fixed 3-entry trace (all unfired) for when the LLM+RAG path never ran at all."""
+    return [
+        {
+            "query_name": name,
+            "query_text": "",
+            "fired": False,
+            "fire_condition": reason,
+            "chunks": [],
+        }
+        for name in ("historical_disruption_lookup", "export_control_check", "india_sourcing_query")
+    ]
+
+
 _URGENCY_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "IMMEDIATE": 3}
 
 
@@ -361,6 +375,11 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
     action: Optional[MitigationAction] = None
 
     citations_dropped = 0
+    rag_trace: List[Dict[str, Any]] = _skipped_rag_trace(
+        "No OpenAI API key configured — RAG not queried, rule-based fallback used."
+        if not has_openai_api_key()
+        else "Event metadata unavailable — RAG not queried, rule-based fallback used."
+    )
 
     if has_openai_api_key() and metadata is not None:
         try:
@@ -368,7 +387,7 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
                 record.get("export_control_level") is not None
                 and float(record["export_control_level"]) >= _EXPORT_CONTROL_TOP_QUARTILE
             )
-            rag_context = build_mitigation_context(
+            rag_context, rag_trace = build_mitigation_context_structured(
                 disruption_type=metadata.disruption_type,
                 order_region=record.get("order_region"),
                 risk_label=state.risk_label,
@@ -401,6 +420,10 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
                     response_model=MitigationLLMOutput,
                     model=MODEL_REASONING,
                     max_tokens=1024,
+                    run_id=state.run_id,
+                    agent_name="L7_mitigation",
+                    trace=state.langfuse_trace,
+                    span=state.langfuse_span,
                 )
                 citations_dropped = len(raw_llm_output.rag_citations) - len(
                     _validate_citations(raw_llm_output.rag_citations, known_sources)
@@ -438,6 +461,7 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
     return {
         "mitigation_action": action,
         "mitigation_llm": llm_output,
+        "mitigation_rag_trace": rag_trace,
         "agent_logs": state.agent_logs + [
             f"L7: Mitigation recommendation {'(gpt-4o+RAG)' if llm_used else '(rule-based fallback)'} "
             f"generated and persisted. urgency={action.urgency} "

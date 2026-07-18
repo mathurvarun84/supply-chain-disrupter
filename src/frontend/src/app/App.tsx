@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Activity, BarChart2, Shield, Eye, Database, Settings, Play,
-  Copy, Clock, Server, Map, RefreshCw, Wrench,
+  Copy, Clock, Server, Map, RefreshCw, Wrench, Sparkles,
 } from "lucide-react";
 import { AgentNode } from "./components/AgentNode";
 import { TabPlaceholder } from "./components/TabPlaceholder";
@@ -12,6 +12,7 @@ import { TabMitigationPlan } from "./TabMitigationPlan";
 import { TabForecastSimulation } from "./TabForecastSimulation";
 import { TabRagEval } from "./TabRagEval";
 import { TabObservability } from "./TabObservability";
+import { TabTrulens } from "./TabTrulens";
 import { TabAdmin } from "./TabAdmin";
 import { usePipelineStatus } from "./hooks/usePipelineStatus";
 import { DemoScenarioInjector } from "./components/pipeline/DemoScenarioInjector";
@@ -23,6 +24,7 @@ const TABS = [
   { icon: Map, label: "Mitigation Plan", day: 5 },
   { icon: Eye, label: "Observability", day: 6 },
   { icon: Database, label: "RAG / RAGAS", day: 7 },
+  { icon: Sparkles, label: "TruLens", day: 9 },
   { icon: Wrench, label: "Admin", day: 9 },
 ];
 
@@ -185,6 +187,8 @@ export default function App() {
             ) : activeTab === 5 ? (
               <TabRagEval />
             ) : activeTab === 6 ? (
+              <TabTrulens />
+            ) : activeTab === 7 ? (
               <TabAdmin />
             ) : (
               <TabPlaceholder title={TABS[activeTab].label} day={TABS[activeTab].day} />

@@ -2,8 +2,8 @@
 Pipeline control (top status bar) — POST /run starts a real L1-L7 pipeline
 run as a FastAPI BackgroundTask and GET /status reports its live progress.
 
-Deliberate choice: the BackgroundTask target is run_agent_sequence(), NOT
-run_agent_graph() (the compiled LangGraph StateGraph). run_agent_sequence()
+Deliberate choice: the BackgroundTask target is run_pipeline(), NOT
+run_agent_graph() (the compiled LangGraph StateGraph). run_pipeline()
 wraps every agent with agent_span()/pipeline_trace() (src/utils/
 observability.py), which is what makes agent_execution_log — and therefore
 this router's GET /status — non-empty. run_agent_graph() has no such
@@ -23,7 +23,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from src.agents.data_ingestion_agent import DataIngestionAgent
 from src.agents.demo_injector import build_demo_payload
-from src.agents.langgraph_engine import run_agent_sequence
+from src.agents.langgraph_engine import run_pipeline
 from src.agents.pipeline_bridge import snapshot_run_outputs
 from src.api.schemas import AgentState, PipelineRunRequest, PipelineRunResponse, PipelineStatus
 from src.utils.db_utils import (
@@ -173,7 +173,7 @@ def _refresh_live_data() -> None:
 def _run_and_snapshot(run_id: str, payload: Dict[str, Any]) -> None:
     """BackgroundTask body: run the real pipeline, then bridge L4/L6/L7's
     output into the dashboard tables. Per-agent failure handling already
-    lives inside run_agent_sequence() (L1-L4/L7 critical, L5/L6 optional);
+    lives inside run_pipeline() (L1-L4/L7 critical, L5/L6 optional);
     this wrapper only needs to snapshot whatever GlobalState comes back.
 
     Live mode additionally fetches fresh news/weather first (see
@@ -192,7 +192,7 @@ def _run_and_snapshot(run_id: str, payload: Dict[str, Any]) -> None:
             payload["disruption_type"] = disruption_type
         finally:
             _RUN_PHASE.pop(run_id, None)
-    final_state = run_agent_sequence(payload)
+    final_state = run_pipeline(payload)
     snapshot_run_outputs(run_id, final_state)
 
 
@@ -254,7 +254,7 @@ def list_recent_runs(limit: int = 10) -> Dict[str, Any]:
 
 
 @router.post("/run", response_model=PipelineRunResponse)
-def run_pipeline(
+def submit_pipeline_run(
     request: PipelineRunRequest, background_tasks: BackgroundTasks
 ) -> PipelineRunResponse:
     if request.mode == "demo" and not request.demo_scenario_id:

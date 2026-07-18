@@ -29,8 +29,12 @@ export function MitigationSidebar({ data }: { data: MitigationResponse }) {
 
       <section className="rounded-panel p-4 bg-card border border-border">
         <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Slack Message Preview</div>
-        <div className="mt-3 rounded-btn border border-border bg-background px-3 py-2 text-xs leading-5 text-foreground whitespace-pre-wrap">
-          {data.slack_preview ? data.slack_preview : <EmptyValue label="slack preview" />}
+        <div className="mt-3 rounded-btn border border-border bg-background px-3 py-2 text-xs leading-5 text-foreground whitespace-pre-wrap font-mono">
+          {data.slack_alert_fired && data.slack_preview ? (
+            data.slack_preview
+          ) : (
+            <span className="font-sans text-muted-foreground">No alert fired for this run.</span>
+          )}
         </div>
       </section>
 

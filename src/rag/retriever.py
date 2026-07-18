@@ -236,3 +236,101 @@ def build_mitigation_context(
     sections.append(format_rag_chunks(q3, "India Sourcing (ISM/PLI)"))
 
     return "\n\n" + "\n\n".join(sections)
+
+
+def _chunk_to_trace_dict(chunk: Dict[str, Any]) -> Dict[str, Any]:
+    meta = chunk.get("metadata", {})
+    score = chunk.get("cross_encoder_score")
+    if score is None:
+        dist = chunk.get("bi_encoder_distance", chunk.get("distance"))
+        score = float(dist) if isinstance(dist, (int, float)) else None
+    return {
+        "collection": chunk.get("collection", meta.get("collection", "unknown")),
+        "source_file": meta.get("source_file", meta.get("source", "unknown")),
+        "similarity_score": score,
+        "snippet": chunk["text"].strip().replace("\n", " ")[:450],
+    }
+
+
+def build_mitigation_context_structured(
+    disruption_type: str,
+    order_region: Optional[str],
+    risk_label: str,
+    export_control_elevated: bool = False,
+) -> "tuple[str, List[Dict[str, Any]]]":
+    """
+    Same three RAG queries as build_mitigation_context(), but additionally returns
+    the structured per-query trace (fired flag, condition, retrieved chunks) that
+    build_mitigation_context() discards after flattening into the LLM prompt string.
+
+    Used by mitigation_agent.py to populate the Screen 4 RAG Query Trace panel —
+    always returns exactly 3 entries in fixed order, even for queries that didn't
+    fire, so the trace shows *why* a query was skipped, not just what came back.
+    """
+    sections: List[str] = []
+    trace: List[Dict[str, Any]] = []
+
+    q1_query = (
+        f"supply chain {disruption_type} {order_region or ''} "
+        f"{risk_label} risk mitigation response historical"
+    )
+    q1 = retrieve_and_rerank(
+        query=q1_query,
+        collections=["historical_precedents"],
+        bi_encoder_top_n=10,
+        rerank_top_k=4,
+    )
+    sections.append(format_rag_chunks(q1, "Historical Precedents & Mitigation"))
+    trace.append({
+        "query_name": "historical_disruption_lookup",
+        "query_text": q1_query,
+        "fired": True,
+        "fire_condition": "Always queried",
+        "chunks": [_chunk_to_trace_dict(c) for c in q1],
+    })
+
+    q2_query = "BIS export control semiconductor restriction compliance sourcing"
+    if export_control_elevated:
+        q2 = retrieve_and_rerank(
+            query=q2_query,
+            collections=["export_control_corpus"],
+            bi_encoder_top_n=8,
+            rerank_top_k=2,
+        )
+        sections.append(format_rag_chunks(q2, "Export Control Compliance"))
+        trace.append({
+            "query_name": "export_control_check",
+            "query_text": q2_query,
+            "fired": True,
+            "fire_condition": "Fires only when export_control_level is in the top quartile",
+            "chunks": [_chunk_to_trace_dict(c) for c in q2],
+        })
+    else:
+        trace.append({
+            "query_name": "export_control_check",
+            "query_text": q2_query,
+            "fired": False,
+            "fire_condition": "Fires only when export_control_level is in the top quartile",
+            "chunks": [],
+        })
+
+    q3_query = (
+        "India semiconductor mission ISM PLI electronics Dixon Tata "
+        "Foxconn Wistron Kaynes alternate sourcing domestic procurement"
+    )
+    q3 = retrieve_and_rerank(
+        query=q3_query,
+        collections=["india_sourcing_corpus"],
+        bi_encoder_top_n=8,
+        rerank_top_k=3,
+    )
+    sections.append(format_rag_chunks(q3, "India Sourcing (ISM/PLI)"))
+    trace.append({
+        "query_name": "india_sourcing_query",
+        "query_text": q3_query,
+        "fired": True,
+        "fire_condition": "Always queried",
+        "chunks": [_chunk_to_trace_dict(c) for c in q3],
+    })
+
+    return "\n\n" + "\n\n".join(sections), trace

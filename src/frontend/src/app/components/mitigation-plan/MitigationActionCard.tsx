@@ -6,6 +6,15 @@
 import { CitationChip } from "../risk-classification/CitationChip";
 import type { MitigationRankedAction } from "../../types/mitigation";
 
+const ACTION_TYPE_LABEL: Record<MitigationRankedAction["action_type"], string> = {
+  INVENTORY: "Inventory",
+  ROUTING: "Routing",
+  SOURCING: "Sourcing",
+  "INDIA-SOURCING": "India Sourcing",
+  MONITOR: "Monitor",
+  FINANCIAL: "Financial",
+};
+
 export function MitigationActionCard({ action }: { action: MitigationRankedAction }) {
   return (
     <article className="rounded-panel p-4 bg-card border border-border">
@@ -14,11 +23,18 @@ export function MitigationActionCard({ action }: { action: MitigationRankedActio
           {action.rank}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm leading-6 text-foreground">{action.text}</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {ACTION_TYPE_LABEL[action.action_type]}
+          </div>
+          <div className="mt-1 text-sm leading-6 text-foreground">{action.text}</div>
           {action.citations.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
               {action.citations.map((citation) => (
-                <CitationChip key={citation} source={citation} collection="mitigation" />
+                <CitationChip
+                  key={`${citation.collection}:${citation.source_file}`}
+                  source={citation.source_file}
+                  collection={citation.collection}
+                />
               ))}
             </div>
           )}

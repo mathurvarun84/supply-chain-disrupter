@@ -136,9 +136,13 @@ def run_agent_graph(payload: Dict[str, Any]) -> GlobalState:
     return GlobalState.model_validate(result)
 
 
-def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
+def run_pipeline(payload: Dict[str, Any]) -> GlobalState:
     """
-    Sequential L1–L7 runner with full observability instrumentation.
+    Single instrumented entry point for the L1-L7 pipeline. Formerly named
+    run_agent_sequence() -- this is the only production caller path now
+    (src/api/routers/pipeline.py, scripts/seed_demo_run.py); run_agent_graph()
+    remains for tests and dashboard.py's Scenario Analyzer, which is
+    deliberately left unobserved.
 
     Each agent is wrapped by agent_span(), which writes agent_execution_log
     (unconditional) and a Langfuse span (best-effort). LLM agents additionally
@@ -147,6 +151,15 @@ def run_agent_sequence(payload: Dict[str, Any]) -> GlobalState:
 
     run_id is taken from payload["run_id"] when present; a new UUID is minted
     otherwise so observability works even when called directly without one.
+
+    Intentionally NOT driven by build_agent_graph(payload).stream(): L2/L3/L4
+    read state.langfuse_span to nest their own LLM-call spans under that
+    node's span, which only works because this function mutates
+    state.langfuse_span right before each manual node call. .stream() threads
+    state through LangGraph's own internal runtime between nodes, so there is
+    no way to inject a per-node span before that node runs -- switching to it
+    would permanently flatten L2/L3/L4's LLM spans to the trace root. Keep
+    this manual step-by-step shape; do not "simplify" it into .stream().
     """
     from src.utils.db_utils import ensure_schema, ensure_sku_id_columns, set_agent_execution_detail
     from src.utils.observability import agent_span, pipeline_trace

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routers import (
     pipeline, live_feed, risk, forecast, simulation, mitigation, observability, guardrails, rag, admin,
+    trulens,
 )
 
 app = FastAPI(
@@ -34,6 +35,7 @@ app.include_router(observability.router, prefix="/api/observability", tags=["obs
 app.include_router(guardrails.router, prefix="/api/guardrails", tags=["guardrails"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(trulens.router, prefix="/api/trulens", tags=["trulens"])
 
 
 @app.get("/api/health")

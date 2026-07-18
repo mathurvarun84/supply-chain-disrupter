@@ -1,8 +1,8 @@
 """
 Day 9 — POST /api/pipeline/run + GET /api/pipeline/status, and the
 snapshot_run_outputs() bridge that writes L4/L6/L7 into run_id-keyed
-dashboard tables. No live OpenAI/LangGraph calls: run_agent_sequence() is
-mocked everywhere except test_run_calls_run_agent_sequence_not_run_agent_graph,
+dashboard tables. No live OpenAI/LangGraph calls: run_pipeline() is
+mocked everywhere except test_run_calls_run_pipeline_not_run_agent_graph,
 which exists specifically to assert it (not run_agent_graph) is the
 BackgroundTask target.
 """
@@ -88,7 +88,7 @@ def test_replay_mode_short_circuits_no_background_task(seeded_db):
         "INSERT INTO agent_execution_log (run_id, agent_name, status, started_at, completed_at) "
         "VALUES ('replay-run-1', 'L7_mitigation', 'Complete', 't0', 't1')"
     )
-    with patch("src.api.routers.pipeline.run_agent_sequence") as mock_run:
+    with patch("src.api.routers.pipeline.run_pipeline") as mock_run:
         resp = client.post(
             "/api/pipeline/run", json={"mode": "replay", "replay_run_id": "replay-run-1"}
         )
@@ -97,8 +97,8 @@ def test_replay_mode_short_circuits_no_background_task(seeded_db):
     mock_run.assert_not_called()
 
 
-def test_run_calls_run_agent_sequence_not_run_agent_graph(seeded_db):
-    with patch("src.api.routers.pipeline.run_agent_sequence") as mock_seq, patch(
+def test_run_calls_run_pipeline_not_run_agent_graph(seeded_db):
+    with patch("src.api.routers.pipeline.run_pipeline") as mock_seq, patch(
         "src.agents.langgraph_engine.run_agent_graph"
     ) as mock_graph, patch(
         "src.api.routers.pipeline.build_demo_payload", return_value={"run_id": "x", "mode": "demo"}
@@ -115,7 +115,7 @@ def test_run_calls_run_agent_sequence_not_run_agent_graph(seeded_db):
 def test_live_mode_refreshes_live_data_before_pipeline(seeded_db):
     """mode='live' should fetch fresh news/weather (DataIngestionAgent.run_batch())
     before running L1-L7, so the Live Feed tab has something new to show."""
-    with patch("src.api.routers.pipeline.run_agent_sequence") as mock_seq, patch(
+    with patch("src.api.routers.pipeline.run_pipeline") as mock_seq, patch(
         "src.api.routers.pipeline.DataIngestionAgent"
     ) as mock_agent_cls, patch(
         "src.api.routers.pipeline.fetch_scenario_options",
@@ -132,7 +132,7 @@ def test_live_mode_refreshes_live_data_before_pipeline(seeded_db):
 def test_demo_mode_does_not_refresh_live_data(seeded_db):
     """Demo scenarios use fixed historical baselines — no reason to hit
     live connectors, so run_batch() must not be called for mode='demo'."""
-    with patch("src.api.routers.pipeline.run_agent_sequence") as mock_seq, patch(
+    with patch("src.api.routers.pipeline.run_pipeline") as mock_seq, patch(
         "src.api.routers.pipeline.DataIngestionAgent"
     ) as mock_agent_cls, patch(
         "src.api.routers.pipeline.build_demo_payload", return_value={"run_id": "z", "mode": "demo"}
@@ -164,7 +164,7 @@ def test_live_mode_status_shows_fetching_phase_before_l1_starts(seeded_db):
         )
         return MagicMock(status="ok")
 
-    with patch("src.api.routers.pipeline.run_agent_sequence") as mock_seq, patch(
+    with patch("src.api.routers.pipeline.run_pipeline") as mock_seq, patch(
         "src.api.routers.pipeline.DataIngestionAgent"
     ) as mock_agent_cls, patch(
         "src.api.routers.pipeline.fetch_scenario_options",
@@ -185,7 +185,7 @@ def test_live_mode_status_shows_fetching_phase_before_l1_starts(seeded_db):
     assert body["is_complete"] is False
     assert all(a["status"] == "Idle" for a in body["agents"])
 
-    # Phase is cleared once the sweep finishes (before run_agent_sequence runs).
+    # Phase is cleared once the sweep finishes (before run_pipeline runs).
     assert run_id not in pipeline_module._RUN_PHASE
 
 

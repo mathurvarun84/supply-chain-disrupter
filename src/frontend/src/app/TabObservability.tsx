@@ -22,7 +22,7 @@ const TOOLTIP_STYLE = {
 // ── API types ─────────────────────────────────────────────────────────────
 interface CostByAgent    { agent: string; cost: number }
 interface VerdictSlice   { name: string; value: number; color: string }
-interface LatencyByAgent { agent: string; p50: number; p90: number }
+interface LatencyByAgent { agent: string; p50: number; p90: number; p99: number }
 interface PromptLogRow   {
   ts: string; agent: string; model: string;
   prompt: string; resp: string; full_prompt?: string;
@@ -117,8 +117,8 @@ export function TabObservability() {
                     </a>
                   )}
                 </div>
-                <ResponsiveContainer width="100%" height={130}>
-                  <BarChart data={costData} layout="vertical">
+                <ResponsiveContainer width="100%" height={Math.max(130, costData.length * 32)}>
+                  <BarChart data={costData} layout="vertical" margin={{ left: 4, right: 12 }}>
                     <XAxis
                       type="number"
                       tick={{ fill: "#475569", fontSize: 9 }}
@@ -128,7 +128,8 @@ export function TabObservability() {
                       type="category"
                       dataKey="agent"
                       tick={{ fill: "#94A3B8", fontSize: 10, fontFamily: "JetBrains Mono" }}
-                      width={80}
+                      width={96}
+                      interval={0}
                     />
                     <CartesianGrid stroke="#1E293B" strokeDasharray="3 3" horizontal={false} />
                     <Tooltip
@@ -170,22 +171,26 @@ export function TabObservability() {
               </div>
             </div>
 
-            {/* P50 / P90 Latency */}
+            {/* P50 / P90 / P99 Latency */}
             <div className="rounded-lg p-4" style={{ background: PANEL, border: `1px solid ${BORDER}` }}>
-              <div className="text-xs font-semibold text-slate-400 mb-3">P50 / P90 Latency per Agent (s)</div>
-              <ResponsiveContainer width="100%" height={140}>
-                <BarChart data={latencyData} layout="vertical">
+              <div className="text-xs font-semibold text-slate-400 mb-3">
+                P50 / P90 / P99 Latency per Agent (s)
+              </div>
+              <ResponsiveContainer width="100%" height={Math.max(140, latencyData.length * 32)}>
+                <BarChart data={latencyData} layout="vertical" margin={{ left: 4, right: 12 }}>
                   <XAxis type="number" tick={{ fill: "#475569", fontSize: 9 }} />
                   <YAxis
                     type="category"
                     dataKey="agent"
                     tick={{ fill: "#94A3B8", fontSize: 10, fontFamily: "JetBrains Mono" }}
                     width={100}
+                    interval={0}
                   />
                   <CartesianGrid stroke="#1E293B" strokeDasharray="3 3" horizontal={false} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
                   <Bar dataKey="p50" fill="#3B82F6" name="P50" radius={[0, 2, 2, 0]} barSize={5} />
                   <Bar dataKey="p90" fill="#8B5CF6" name="P90" radius={[0, 2, 2, 0]} barSize={5} />
+                  <Bar dataKey="p99" fill="#EC4899" name="P99" radius={[0, 2, 2, 0]} barSize={5} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

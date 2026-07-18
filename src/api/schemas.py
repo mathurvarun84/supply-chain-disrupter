@@ -164,10 +164,34 @@ class SimulationResponse(BaseModel):
     days_to_stockout_p90: Optional[float] = None
 
 
+class MitigationCitation(BaseModel):
+    """One RAG-grounded citation, split from the agent's "<collection>: <source_file>"
+    string — see src.utils.db_utils._parse_citation."""
+    source_file: str
+    collection: str
+
+
 class RankedAction(BaseModel):
     rank: int
     text: str
-    citations: List[str] = Field(default_factory=list)
+    action_type: Literal["INVENTORY", "ROUTING", "SOURCING", "INDIA-SOURCING", "MONITOR", "FINANCIAL"]
+    citations: List[MitigationCitation] = Field(default_factory=list)
+
+
+class RagTraceChunk(BaseModel):
+    source_file: Optional[str] = None
+    collection: Optional[str] = None
+    similarity_score: Optional[float] = None
+    snippet: Optional[str] = None
+
+
+class RagTraceQuery(BaseModel):
+    """One row in the expandable RAG Query Trace panel."""
+    query_name: Literal["historical_disruption_lookup", "export_control_check", "india_sourcing_query"]
+    query_text: str
+    fired: bool
+    fire_condition: str
+    retrieved_chunks: List[RagTraceChunk] = Field(default_factory=list)
 
 
 class MitigationResponse(BaseModel):
@@ -175,10 +199,11 @@ class MitigationResponse(BaseModel):
     risk_level: RiskLevel
     summary: Optional[str] = None
     urgency: Literal["LOW", "MEDIUM", "HIGH", "IMMEDIATE"]
+    mitigation_window: Optional[str] = None
     ranked_actions: List[RankedAction]
-    rag_citations: List[str] = Field(default_factory=list)
-    rag_query_trace: List[str]
+    rag_query_trace: List[RagTraceQuery]
     india_sourcing_recommendations: List[str]
+    slack_alert_fired: bool
     slack_preview: Optional[str] = None
     cost_delta: Optional[str] = None
     cost_delta_usd: Optional[float] = None
@@ -199,6 +224,7 @@ class LatencyByAgent(BaseModel):
     agent: str
     p50: float
     p90: float
+    p99: float
 
 
 class PromptLogRow(BaseModel):
