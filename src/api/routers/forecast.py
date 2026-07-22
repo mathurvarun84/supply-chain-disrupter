@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from src.api.schemas import (
     ForecastResponse,
     ForecastWeekPoint,
+    ModelComparisonResponse,
     SkuForecastResponse,
 )
 from src.utils.db_utils import fetch_forecast
@@ -17,6 +18,20 @@ router = APIRouter()
 
 # Path to pre-generated forecast JSONs produced by DemandForecastingAgent.run_all()
 _FORECAST_OUTPUTS_DIR = Path(__file__).parents[3] / "data" / "forecast_outputs"
+
+# Lazily-created singleton, same pattern as src/forecast_dashboard.py — source
+# tables are loaded once on first use rather than at import time, so a plain
+# FastAPI startup doesn't pay this cost when the comparison endpoint is unused.
+_agent = None
+
+
+def _get_agent():
+    global _agent
+    if _agent is None:
+        from src.agents.forecast.agent import DemandForecastingAgent
+        _agent = DemandForecastingAgent()
+        _agent._load_source_tables()
+    return _agent
 
 
 @router.get("/sku/list", response_model=List[str])
@@ -124,6 +139,27 @@ def get_sku_forecast(sku_id: str):
         prophet_forecast=week_points,
         generated_at_utc=None,
     )
+
+
+@router.get("/sku/{sku_id}/model-comparison", response_model=ModelComparisonResponse)
+def get_sku_model_comparison(sku_id: str):
+    """Backtest Prophet/SARIMAX/TimeGPT for this SKU and return chart-ready
+    comparison data (labels, per-model predictions, scores, winner).
+
+    Computed live on every call (fits multiple models against the holdout
+    window) — same behavior as the standalone Flask dashboard's
+    /api/model-comparison/<sku_id> (src/forecast_dashboard.py), just wrapped
+    for the FastAPI app instead of requiring a second server.
+    """
+    try:
+        agent = _get_agent()
+        return ModelComparisonResponse(**agent.get_model_comparison_chart_data(sku_id))
+    except Exception as exc:
+        logger.warning("get_model_comparison_chart_data failed for %s: %s", sku_id, exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not compute model comparison for SKU '{sku_id}': {exc}",
+        )
 
 
 @router.get("/{run_id}", response_model=ForecastResponse)

@@ -111,6 +111,10 @@ class ForecastResponse(BaseModel):
     category: str
     categories: List[str]
     series: List[ForecastPoint]
+    # L4's canonical duration_days, threaded through ForecastHandoff --
+    # shown alongside Simulation/Mitigation's own copy so the UI can
+    # confirm all three agents used the same disruption length.
+    impact_duration_days: Optional[float] = None
 
 
 class ForecastWeekPoint(BaseModel):
@@ -141,6 +145,31 @@ class SkuForecastResponse(BaseModel):
     generated_at_utc: Optional[str] = None
 
 
+class ModelScore(BaseModel):
+    rmse: float
+    rmsle: float
+    smape: float
+    mape: float
+    latency_sec: float
+
+
+class ModelComparisonResponse(BaseModel):
+    """Backtest comparison of candidate forecast models for one SKU (L5 DemandForecastingAgent).
+
+    Mirrors DemandForecastingAgent.get_model_comparison_chart_data(), previously
+    only exposed via the standalone Flask dashboard (src/forecast_dashboard.py).
+    """
+    sku_id: str
+    labels: List[str]
+    actual: List[float]
+    prophet: List[float]
+    sarimax: List[float]
+    timegpt: Optional[List[float]] = None
+    timegpt_status: str
+    winner: str
+    scores: Dict[str, ModelScore]
+
+
 class SimulationBucket(BaseModel):
     range: str
     count: int
@@ -162,6 +191,15 @@ class SimulationResponse(BaseModel):
     days_to_stockout_p10: Optional[float] = None
     days_to_stockout_p50: Optional[float] = None
     days_to_stockout_p90: Optional[float] = None
+    # Same winning SKU_id L4/L5 resolved for this run — shown next to
+    # Forecast/Mitigation's own sku_id so all three agents' output can be
+    # visually confirmed as running on the same SKU.
+    sku_id: Optional[str] = None
+    # Disruption length this simulation's trials actually used -- L4's
+    # canonical duration_days when available (see priors.py's
+    # shock_duration resolution), so the UI can confirm L6 used the same
+    # duration as Forecast/Mitigation.
+    impact_duration_days: Optional[float] = None
 
 
 class MitigationCitation(BaseModel):
@@ -207,6 +245,13 @@ class MitigationResponse(BaseModel):
     slack_preview: Optional[str] = None
     cost_delta: Optional[str] = None
     cost_delta_usd: Optional[float] = None
+    # Same winning SKU_id L4/L5/L6 resolved for this run — shown next to
+    # Forecast/Simulation's own sku_id so all three agents' output can be
+    # visually confirmed as running on the same SKU.
+    sku_id: Optional[str] = None
+    # Numeric twin of mitigation_window's formatted string -- same L4
+    # canonical duration_days source, for a consistent badge across panels.
+    impact_duration_days: Optional[float] = None
 
 
 class CostByAgent(BaseModel):
@@ -299,3 +344,23 @@ class AdminStatusResponse(BaseModel):
     db_job: AdminJobStatus
     rag_job: AdminJobStatus
     corpus: List[CorpusHealth]
+
+
+class TableSummary(BaseModel):
+    name: str
+    row_count: int
+    column_count: int
+
+
+class TableListResponse(BaseModel):
+    tables: List[TableSummary]
+
+
+class TableRowsResponse(BaseModel):
+    table_name: str
+    columns: List[str]
+    rows: List[Dict[str, Any]]
+    total_rows: int
+    page: int
+    page_size: int
+    total_pages: int

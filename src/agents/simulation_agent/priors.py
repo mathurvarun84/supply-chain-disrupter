@@ -144,7 +144,16 @@ def build_simulation_params(state: GlobalState, trials: int, seed: Optional[int]
         unit_price = 1.0
 
     severity = float(meta.severity) if meta else 0.0
-    shock_duration = int(meta.shock_duration_days) if meta else 0
+    # Prefer L4's canonical duration_days (ForecastHandoff, already the max
+    # of L2 news evidence + event shock_duration_days -- see
+    # risk_classifier_agent._max_duration_days) over recomputing from raw
+    # event_metadata directly, so L5/L6 agree on the same disruption length
+    # L4 actually classified on. Falls back to event_metadata when L4 had no
+    # sku_id to build a handoff for (e.g. rule-only replay).
+    if state.forecast_handoff is not None and state.forecast_handoff.duration_days is not None:
+        shock_duration = int(state.forecast_handoff.duration_days)
+    else:
+        shock_duration = int(meta.shock_duration_days) if meta else 0
     recovery_window = int(meta.recovery_window_days) if meta else 60
     disruption_type = (meta.disruption_type if meta else "unknown").lower()
 

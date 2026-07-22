@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from src.api.schemas import (
     AdminJobStatus,
@@ -23,7 +24,11 @@ from src.api.schemas import (
     AdminStatusResponse,
     CorpusHealth,
     DatabaseStatus,
+    TableListResponse,
+    TableRowsResponse,
+    TableSummary,
 )
+from src.utils import db_utils
 from src.utils.db_utils import ensure_schema
 from src.utils.etl_loader import get_sqlite_stats, load_excel_into_sqlite
 from src.utils.ingestion_schema import ensure_ingestion_schema
@@ -173,3 +178,93 @@ def build_rag(background_tasks: BackgroundTasks, flush: bool = False) -> AdminJo
         return AdminJobTriggerResponse(status="skipped_already_running", triggered_at=_utcnow_iso())
     background_tasks.add_task(_run_rag_build, flush)
     return AdminJobTriggerResponse(status="started", triggered_at=_utcnow_iso())
+
+
+# ── Data Explorer (read-only table browser) ──────────────────────────────
+# Two GET-only endpoints so the Admin page can inspect outputs/supply_chain.db
+# without a terminal sqlite3 session. table_name is a path segment, so it
+# can't be parameterized like a value — every request re-checks it against a
+# fresh sqlite_master read before it touches a SELECT string, and the
+# connection itself is opened read-only (mode=ro) as a second, independent
+# line of defense.
+
+_INTERNAL_TABLE_PREFIXES = ("sqlite_",)
+
+
+def _readonly_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(f"file:{db_utils.DB_PATH}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+@router.get("/tables", response_model=TableListResponse)
+def list_admin_tables() -> TableListResponse:
+    """Every real table in supply_chain.db (via sqlite_master, never a
+    hardcoded list) with row/column counts. Feeds DataExplorer.tsx's
+    table dropdown via useAdminTables()."""
+    try:
+        conn = _readonly_connection()
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
+
+    with conn:
+        table_names = [
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
+            if not row["name"].startswith(_INTERNAL_TABLE_PREFIXES)
+        ]
+        summaries = []
+        for name in table_names:
+            # name comes only from sqlite_master itself here, never from
+            # client input, so this interpolation is safe.
+            row_count = conn.execute(f'SELECT COUNT(*) AS c FROM "{name}"').fetchone()["c"]
+            column_count = len(conn.execute(f'PRAGMA table_info("{name}")').fetchall())
+            summaries.append(TableSummary(name=name, row_count=row_count, column_count=column_count))
+
+    return TableListResponse(tables=summaries)
+
+
+@router.get("/tables/{table_name}", response_model=TableRowsResponse)
+def get_admin_table_rows(
+    table_name: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
+) -> TableRowsResponse:
+    """One page of rows for a table, validated on every call against a
+    freshly-queried sqlite_master list — never a cached whitelist that could
+    go stale after a Recreate DB run. Unknown tables 404, not 500. Feeds
+    DataExplorer.tsx's grid via useAdminTableRows()."""
+    try:
+        conn = _readonly_connection()
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
+
+    with conn:
+        valid_names = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if table_name not in valid_names:
+            raise HTTPException(status_code=404, detail=f"Unknown table: {table_name}")
+
+        total_rows = conn.execute(f'SELECT COUNT(*) AS c FROM "{table_name}"').fetchone()["c"]
+        columns = [r["name"] for r in conn.execute(f'PRAGMA table_info("{table_name}")')]
+
+        offset = (page - 1) * page_size
+        cursor = conn.execute(
+            f'SELECT * FROM "{table_name}" LIMIT ? OFFSET ?', (page_size, offset)
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+    return TableRowsResponse(
+        table_name=table_name,
+        columns=columns,
+        rows=rows,
+        total_rows=total_rows,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )

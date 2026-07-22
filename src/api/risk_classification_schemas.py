@@ -87,3 +87,13 @@ class RiskClassificationResponse(BaseModel):
     slack_should_fire: bool
     threshold: float = 0.75
     from_cache: bool
+    # Same winning SKU_id L4 resolved for this run -- shown next to
+    # Forecast/Simulation/Mitigation's own sku_id so all four agents' output
+    # can be visually confirmed as running on the same SKU. None on the
+    # legacy order_id cache path for rows predating the SKU crosswalk.
+    sku_id: Optional[str] = None
+    # Top-level mirror of rule_signal.duration_days -- the canonical value
+    # threaded to L5/L6/L7 via ForecastHandoff.duration_days -- so the
+    # frontend can read the same field name across all four response types
+    # instead of reaching into rule_signal just for Screen 2.
+    impact_duration_days: Optional[float] = None

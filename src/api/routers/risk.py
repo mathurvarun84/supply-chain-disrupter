@@ -43,6 +43,7 @@ from src.utils.db_utils import (
     fetch_latest_classified_order_id,
     fetch_record_by_order_id,
     fetch_risk_classification,
+    fetch_risk_classification_output,
 )
 
 router = APIRouter()
@@ -109,6 +110,7 @@ def _response_from_cached_row(order_id: int, row: dict) -> RiskClassificationRes
             final_critical_flag=critical_flag,
             slack_should_fire=critical_flag,
             from_cache=True,
+            impact_duration_days=row["duration_days"],
         )
 
     parsed = json.loads(full_result_json)
@@ -127,6 +129,7 @@ def _response_from_cached_row(order_id: int, row: dict) -> RiskClassificationRes
         final_critical_flag=critical_flag,
         slack_should_fire=critical_flag,
         from_cache=True,
+        impact_duration_days=row["duration_days"],
     )
 
 
@@ -198,6 +201,40 @@ def _response_from_result(
         final_critical_flag=critical_flag,
         slack_should_fire=critical_flag,
         from_cache=False,
+        impact_duration_days=rs.duration_days,
+    )
+
+
+def _response_from_run_snapshot(run_id: str, snapshot: dict) -> RiskClassificationResponse:
+    """Build a response from risk_classification_output -- the pipeline
+    run_id-keyed dashboard snapshot written incrementally by
+    langgraph_engine.run_pipeline() as soon as L4 finishes (see
+    pipeline_bridge.persist_risk_classification_output). full_result is the
+    same RiskClassificationResult shape _response_from_cached_row parses
+    from the order_id cache, just keyed by the real pipeline run_id instead
+    of an order_id -- so Screen 2 can follow the active run like Screens
+    3/4 do, without waiting for the whole pipeline to finish."""
+    parsed = snapshot["full_result"]
+    rule_signal = RuleSignalResponse(**parsed["rule_signal"])
+    db_sig = parsed.get("distilbert_signal")
+    llm_sig = parsed.get("llm_signal")
+    jv = parsed.get("judge_verdict")
+    final_label = snapshot["final_label"]
+    critical_flag = snapshot["critical_flag"]
+    return RiskClassificationResponse(
+        run_id=run_id,
+        order_id=int(parsed.get("order_id") or 0),
+        mode=parsed.get("mode", "replay"),
+        rule_signal=rule_signal,
+        distilbert_signal=DistilBertSignalResponse(**db_sig) if db_sig else DistilBertSignalResponse(),
+        llm_signal=LlmSignalResponse(**llm_sig) if llm_sig else LlmSignalResponse(),
+        judge_verdict=JudgeVerdictResponse(**jv) if jv else None,
+        final_label=final_label,
+        final_critical_flag=critical_flag,
+        slack_should_fire=critical_flag,
+        sku_id=parsed.get("sku_id"),
+        from_cache=False,
+        impact_duration_days=parsed.get("duration_days"),
     )
 
 
@@ -249,11 +286,24 @@ def get_latest_risk_classification() -> RiskClassificationResponse:
 
 @router.get("/{run_id}", response_model=RiskClassificationResponse)
 def get_risk_classification(run_id: str) -> RiskClassificationResponse:
-    """Return the ensemble risk-classification result for a given
-    run_id, where run_id is an order_id (see plan doc for why
-    ingestion_run_id doesn't apply here)."""
+    """Return the ensemble risk-classification result for a given run_id.
+
+    Lookup order:
+      1. risk_classification_output -- the real pipeline run_id-keyed
+         dashboard snapshot, written as soon as L4 finishes inside
+         run_pipeline() (not at the end of the whole run). This is the path
+         Screen 2 uses once wired to an active run_id, matching how
+         Screens 3/4 read their own run_id-keyed snapshots.
+      2. Legacy: run_id as an order_id (int) -- direct historical-order
+         lookups outside a pipeline run (e.g. manual navigation), unchanged
+         from the original behavior.
+    """
+    snapshot = fetch_risk_classification_output(run_id)
+    if snapshot is not None:
+        return _response_from_run_snapshot(run_id, snapshot)
+
     try:
         order_id = int(run_id)
     except ValueError:
-        raise HTTPException(status_code=404, detail=f"Invalid run_id: {run_id}")
+        raise HTTPException(status_code=404, detail=f"No risk classification for run_id={run_id}")
     return _classify_order(order_id)

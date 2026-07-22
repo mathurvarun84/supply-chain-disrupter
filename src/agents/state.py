@@ -53,6 +53,10 @@ class ForecastResult(BaseModel):
     mape_improvement_pct_vs_dataset_baseline: Optional[float] = None
     disruption_scenario: Optional[Dict[str, Any]] = None
     forecast_agent_logs: List[str] = Field(default_factory=list)
+    # L4's ForecastHandoff.duration_days, mirrored here (also present inside
+    # disruption_scenario["duration_days"]) as a top-level field so the API/
+    # UI don't need to reach into the scenario dict just to show it.
+    impact_duration_days: Optional[float] = None
 
 
 class ForecastHandoff(BaseModel):
@@ -73,6 +77,13 @@ class ForecastHandoff(BaseModel):
     risk_score_composite: float
     risk_label: str
     candidates_considered: int = 1   # audit trail: how many records were in play for this event
+    # Same value as RiskClassificationResult.rule_signal.duration_days --
+    # L4's escalated max(news expected_duration_days, event shock_duration_days).
+    # The single canonical "how long does this disruption last" figure that
+    # L5/L6/L7 should all read from here, instead of L6 recomputing it
+    # independently from raw L1/L2 signals. None when L4 had no duration
+    # evidence to escalate on (e.g. rule-only replay with no event metadata).
+    duration_days: Optional[float] = None
 
 
 class SimulationResult(BaseModel):
@@ -90,6 +101,11 @@ class SimulationResult(BaseModel):
     trials_run: int = 0
     model_version: str = "mc_v1"
     revenue_impact_samples: List[float] = Field(default_factory=list)
+    # The disruption duration actually used to drive this simulation's
+    # trials (see simulation_agent/priors.py's shock_duration resolution) --
+    # sourced from ForecastHandoff.duration_days (L4) when available, so the
+    # UI can confirm L6 used the same duration L4 classified on.
+    impact_duration_days: Optional[float] = None
 
 
 class MitigationAction(BaseModel):

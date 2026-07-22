@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import type { RiskClassification } from "../../types/riskClassification";
 import { RiskBadge } from "./RiskBadge";
 import { useAnimateOnChange, useCountUp } from "../../utils/animation";
+import { ImpactDurationBadge, SkuIdBadge } from "../../TabForecastSimulation";
 
 const CIRCUMFERENCE = 2 * Math.PI * 38; // r=38, matches the mockup's radius
 
@@ -22,7 +23,7 @@ const CIRCUMFERENCE = 2 * Math.PI * 38; // r=38, matches the mockup's radius
 // stroke-dashoffset instead (the countFill token's mechanism, applied
 // through a transition rather than a literal @keyframes countFill).
 export function VerdictCard({ data }: { data: RiskClassification }) {
-  const { final_label, rule_signal, threshold, run_id, mode } = data;
+  const { final_label, rule_signal, threshold, run_id, mode, sku_id, impact_duration_days } = data;
   const score = rule_signal.composite_score;
   const targetOffset = CIRCUMFERENCE * (1 - Math.min(score, 1));
 
@@ -64,8 +65,12 @@ export function VerdictCard({ data }: { data: RiskClassification }) {
     <div className="rounded-panel p-5 bg-card border border-border">
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mb-2">
-            Verdict for order {run_id} ({mode})
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">
+              Verdict for order {run_id} ({mode})
+            </span>
+            <SkuIdBadge skuId={sku_id} />
+            <ImpactDurationBadge days={impact_duration_days} />
           </div>
           <RiskBadge level={final_label} pulse size="lg" />
           <div

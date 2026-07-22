@@ -148,6 +148,7 @@ def _build_mitigation_user_message(
     record: dict,
     risk_label: str,
     composite_score: Optional[float],
+    impact_duration_days: Optional[float],
     forecast_drop_pct: Optional[float],
     sim_summary: str,
     rag_context: str,
@@ -161,8 +162,9 @@ SQLITE RECORD DATA (lite_master table — exact values)
 ═══════════════════════════════════════════════════════
 RISK CLASSIFICATION (from Agent 4)
 ═══════════════════════════════════════════════════════
-  risk_label        : {risk_label}
-  composite_score   : {composite_score if composite_score is not None else 'N/A'}
+  risk_label            : {risk_label}
+  composite_score       : {composite_score if composite_score is not None else 'N/A'}
+  impact_duration_days  : {impact_duration_days if impact_duration_days is not None else 'unknown'}
 
 ═══════════════════════════════════════════════════════
 DEMAND FORECAST (from Agent 5, optional)
@@ -408,6 +410,13 @@ def mitigation_recommendation_agent(state: GlobalState) -> Dict[str, Any]:
                     record=record,
                     risk_label=state.risk_label,
                     composite_score=rc.composite_score if rc else None,
+                    # L4's canonical duration (ForecastHandoff.duration_days) when
+                    # available; falls back to RiskClassificationResult.duration_days,
+                    # the same value it was sourced from when no handoff was built.
+                    impact_duration_days=(
+                        state.forecast_handoff.duration_days if state.forecast_handoff is not None
+                        else (rc.duration_days if rc else None)
+                    ),
                     forecast_drop_pct=(
                         state.forecast_result.expected_drop_pct if state.forecast_result else None
                     ),

@@ -14,8 +14,9 @@
  * actually returns for this run_id, so it never shows a category with no
  * real data behind it.
  */
-import { useEffect, useState } from "react";
-import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine } from "recharts";
+import { useCallback, useEffect, useState } from "react";
+import { ResponsiveContainer, AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, Legend } from "recharts";
+import { Play, RefreshCw } from "lucide-react";
 import { API_BASE_URL } from "./api/config";
 
 const BG = "#070D18";
@@ -35,6 +36,7 @@ interface ForecastResponse {
   category: string;
   categories: string[];
   series: ForecastPoint[];
+  impact_duration_days: number | null;
 }
 
 interface SimulationBucket { range: string; count: number }
@@ -51,6 +53,8 @@ interface SimulationResponse {
   days_to_stockout_p10: number | null;
   days_to_stockout_p50: number | null;
   days_to_stockout_p90: number | null;
+  sku_id: string | null;
+  impact_duration_days: number | null;
 }
 
 // GET /api/forecast/sku/{sku_id} — the existing full L5 DemandForecastingAgent
@@ -68,6 +72,36 @@ interface SkuForecastDetail {
   mape_dataset_baseline_avg: number | null;
   mape_dataset_ai_avg: number | null;
   mape_improvement_pct_vs_dataset_baseline: number | null;
+}
+
+// GET /api/forecast/sku/{sku_id}/model-comparison — Prophet/SARIMAX/TimeGPT
+// backtest comparison for one SKU. Fits models live on every call, so this
+// is fetched on demand (button click) rather than automatically like
+// useSkuForecastDetail above.
+interface ModelScore {
+  rmse: number;
+  rmsle: number;
+  smape: number;
+  mape: number;
+  latency_sec: number;
+}
+interface ModelComparisonResponse {
+  sku_id: string;
+  labels: string[];
+  actual: number[];
+  prophet: number[];
+  sarimax: number[];
+  timegpt: number[] | null;
+  timegpt_status: string;
+  winner: string;
+  scores: Record<string, ModelScore>;
+}
+interface ModelComparisonChartPoint {
+  label: string;
+  actual: number;
+  prophet: number;
+  sarimax: number;
+  timegpt?: number;
 }
 
 function useForecast(runId: string | undefined, category: string | undefined) {
@@ -114,6 +148,32 @@ function useSkuForecastDetail(skuId: string | undefined) {
   return data;
 }
 
+function useModelComparison(skuId: string | undefined) {
+  const [data, setData] = useState<ModelComparisonResponse | null>(null);
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+
+  // Reset whenever the selected SKU changes so a stale comparison from a
+  // previous SKU never lingers on screen.
+  useEffect(() => {
+    setData(null);
+    setStatus("idle");
+  }, [skuId]);
+
+  const fetchComparison = useCallback(() => {
+    if (!skuId || skuId === "Skipped-Optional") return;
+    setStatus("loading");
+    fetch(`${API_BASE_URL}/api/forecast/sku/${skuId}/model-comparison`)
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
+      .then((json) => { setData(json); setStatus("ready"); })
+      .catch(() => setStatus("error"));
+  }, [skuId]);
+
+  return { data, status, fetchComparison };
+}
+
 function useSimulation(runId: string | undefined) {
   const [data, setData] = useState<SimulationResponse | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "missing" | "error">("loading");
@@ -146,6 +206,170 @@ function expectedDropPct(series: ForecastPoint[]): number {
   return Math.round(((totalBaseline - totalAdjusted) / totalBaseline) * 100);
 }
 
+const MODEL_COLORS: Record<string, string> = {
+  actual: "#94A3B8",
+  prophet: "#3B82F6",
+  sarimax: "#10B981",
+  timegpt: "#A78BFA",
+};
+
+function ModelComparisonSection({
+  skuId,
+  comparison,
+}: {
+  skuId: string;
+  comparison: ReturnType<typeof useModelComparison>;
+}) {
+  const { data, status, fetchComparison } = comparison;
+
+  if (status === "idle" || status === "loading") {
+    return (
+      <div className="mt-3">
+        <button
+          onClick={fetchComparison}
+          disabled={status === "loading"}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-[11px] font-semibold text-white shadow-sm transition-opacity disabled:opacity-60 disabled:cursor-not-allowed"
+          style={{ background: "#6366F1", border: "1px solid #818CF8" }}
+        >
+          {status === "loading" ? (
+            <RefreshCw size={12} className="animate-spin" />
+          ) : (
+            <Play size={12} fill="white" />
+          )}
+          {status === "loading" ? `Backtesting models for ${skuId}…` : "Compare Models (Prophet · SARIMAX · TimeGPT)"}
+        </button>
+      </div>
+    );
+  }
+
+  if (status === "error" || !data) {
+    return (
+      <div className="mt-3">
+        <div className="text-[10px] font-mono text-red-400 mb-1.5">
+          Could not load model comparison for {skuId}.
+        </div>
+        <button
+          onClick={fetchComparison}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-[11px] font-semibold text-white shadow-sm transition-opacity"
+          style={{ background: "#6366F1", border: "1px solid #818CF8" }}
+        >
+          <RefreshCw size={12} />
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const chartData: ModelComparisonChartPoint[] = data.labels.map((label, i) => ({
+    label,
+    actual: data.actual[i],
+    prophet: data.prophet[i],
+    sarimax: data.sarimax[i],
+    ...(data.timegpt ? { timegpt: data.timegpt[i] } : {}),
+  }));
+
+  return (
+    <div className="mt-3 rounded p-3" style={{ background: BG, border: `1px solid ${BORDER}` }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[11px] font-semibold text-slate-300">Model Comparison (backtest)</span>
+        <div className="flex items-center gap-1.5">
+          <span
+            className="text-[9px] px-1.5 py-0.5 rounded font-mono capitalize"
+            style={{ background: "#10B98118", color: "#10B981", border: "1px solid #10B98130" }}
+          >
+            winner: {data.winner}
+          </span>
+          <button
+            onClick={fetchComparison}
+            title="Re-run backtest"
+            className="flex items-center justify-center rounded transition-opacity hover:opacity-80"
+            style={{ background: BG, color: "#64748B", border: `1px solid ${BORDER}`, width: 20, height: 20 }}
+          >
+            <RefreshCw size={10} />
+          </button>
+        </div>
+      </div>
+
+      <ResponsiveContainer width="100%" height={160}>
+        <LineChart data={chartData}>
+          <XAxis dataKey="label" tick={{ fill: "#475569", fontSize: 8 }} interval={Math.max(0, Math.floor(chartData.length / 5))} />
+          <YAxis tick={{ fill: "#475569", fontSize: 9 }} />
+          <CartesianGrid stroke="#1E293B" strokeDasharray="3 3" />
+          <Tooltip contentStyle={TOOLTIP_STYLE} />
+          <Legend wrapperStyle={{ fontSize: 10 }} />
+          <Line type="monotone" dataKey="actual" stroke={MODEL_COLORS.actual} strokeWidth={2} dot={false} name="Actual" />
+          <Line type="monotone" dataKey="prophet" stroke={MODEL_COLORS.prophet} strokeWidth={data.winner === "prophet" ? 3 : 1.5} strokeDasharray="4 2" dot={false} name="Prophet" />
+          <Line type="monotone" dataKey="sarimax" stroke={MODEL_COLORS.sarimax} strokeWidth={data.winner === "sarimax" ? 3 : 1.5} strokeDasharray="4 2" dot={false} name="SARIMAX" />
+          {data.timegpt && (
+            <Line type="monotone" dataKey="timegpt" stroke={MODEL_COLORS.timegpt} strokeWidth={data.winner === "timegpt" ? 3 : 1.5} strokeDasharray="2 2" dot={false} name="TimeGPT" />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+
+      {!data.timegpt && (
+        <div className="mt-1.5 text-[9px] font-mono text-slate-600">TimeGPT not shown: {data.timegpt_status}</div>
+      )}
+
+      <table className="w-full mt-2 text-[9px] font-mono">
+        <thead>
+          <tr className="text-slate-600">
+            <th className="text-left font-normal py-1">Model</th>
+            <th className="text-right font-normal py-1">RMSE</th>
+            <th className="text-right font-normal py-1">SMAPE</th>
+            <th className="text-right font-normal py-1">MAPE</th>
+            <th className="text-right font-normal py-1">Latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Object.entries(data.scores).map(([model, s]) => (
+            <tr key={model} style={{ borderTop: `1px solid ${BORDER}` }}>
+              <td className={`py-1 capitalize ${model === data.winner ? "text-emerald-400 font-bold" : "text-slate-400"}`}>
+                {model}{model === data.winner ? " ✓" : ""}
+              </td>
+              <td className="text-right py-1 text-slate-400">{s.rmse}</td>
+              <td className="text-right py-1 text-slate-400">{s.smape}%</td>
+              <td className="text-right py-1 text-slate-400">{s.mape}%</td>
+              <td className="text-right py-1 text-slate-400">{s.latency_sec}s</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Shared across Forecast/Simulation/Mitigation panels so the same visual
+// pill confirms all three agents ran on the same SKU_id for this run — not
+// just three panels that happen to agree in the data.
+export function SkuIdBadge({ skuId }: { skuId: string | null | undefined }) {
+  if (!skuId || skuId === "Skipped-Optional") return null;
+  return (
+    <span
+      className="text-[9px] px-1.5 py-0.5 rounded font-mono"
+      style={{ background: "#10B98118", color: "#10B981", border: "1px solid #10B98130" }}
+      title="SKU used by this agent for this run"
+    >
+      SKU {skuId}
+    </span>
+  );
+}
+
+// Same idea as SkuIdBadge, for L4's canonical impact duration -- threaded
+// through ForecastHandoff.duration_days into L5/L6/L7, so this pill lets
+// you confirm all four panels agree on the same disruption length.
+export function ImpactDurationBadge({ days }: { days: number | null | undefined }) {
+  if (days === null || days === undefined) return null;
+  return (
+    <span
+      className="text-[9px] px-1.5 py-0.5 rounded font-mono"
+      style={{ background: "#F9731618", color: "#F97316", border: "1px solid #F9731630" }}
+      title="Disruption duration used by this agent for this run"
+    >
+      {Number.isInteger(days) ? days : days.toFixed(1)}d impact
+    </span>
+  );
+}
+
 function EmptyPanel({ title, badge, message }: { title: string; badge: string; message: string }) {
   return (
     <div className="rounded-lg p-4 flex flex-col" style={{ background: PANEL, border: `1px solid ${BORDER}` }}>
@@ -169,6 +393,7 @@ export function TabForecastSimulation({ runId }: { runId?: string }) {
   const [category, setCategory] = useState<string | undefined>(undefined);
   const { data: forecast, status: forecastStatus } = useForecast(runId, category);
   const skuDetail = useSkuForecastDetail(forecast?.category);
+  const modelComparison = useModelComparison(forecast?.category);
   const { data: simulation, status: simulationStatus } = useSimulation(runId);
 
   // The backend decides the actual selected category (defaults to the
@@ -186,12 +411,16 @@ export function TabForecastSimulation({ runId }: { runId?: string }) {
           <div className="rounded-lg p-4 flex flex-col" style={{ background: PANEL, border: `1px solid ${BORDER}` }}>
             <div className="flex items-center justify-between mb-1">
               <span className="text-sm font-semibold text-slate-200">Demand Forecasting — Prophet</span>
-              <span
-                className="text-[9px] px-2 py-0.5 rounded font-mono"
-                style={{ background: "#818CF818", color: "#818CF8", border: "1px solid #818CF830" }}
-              >
-                Optional · L5
-              </span>
+              <div className="flex items-center gap-1.5">
+                <SkuIdBadge skuId={forecast.category} />
+                <ImpactDurationBadge days={forecast.impact_duration_days} />
+                <span
+                  className="text-[9px] px-2 py-0.5 rounded font-mono"
+                  style={{ background: "#818CF818", color: "#818CF8", border: "1px solid #818CF830" }}
+                >
+                  Optional · L5
+                </span>
+              </div>
             </div>
             <div className="flex gap-1.5 mb-3 flex-wrap">
               {forecast.categories.map((c) => (
@@ -286,6 +515,10 @@ export function TabForecastSimulation({ runId }: { runId?: string }) {
               </div>
             )}
 
+            {skuDetail && forecast.category !== "Skipped-Optional" && (
+              <ModelComparisonSection skuId={forecast.category} comparison={modelComparison} />
+            )}
+
             <div className="mt-1 text-[9px] font-mono text-slate-700">
               {forecast.category === "Skipped-Optional"
                 ? "L5 skipped for this run (insufficient ops_kpi history) — fallback series shown"
@@ -309,12 +542,16 @@ export function TabForecastSimulation({ runId }: { runId?: string }) {
           <div className="rounded-lg p-4 flex flex-col" style={{ background: PANEL, border: `1px solid ${BORDER}` }}>
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm font-semibold text-slate-200">Monte Carlo Simulation</span>
-              <span
-                className="text-[9px] px-2 py-0.5 rounded font-mono"
-                style={{ background: "#818CF818", color: "#818CF8", border: "1px solid #818CF830" }}
-              >
-                Optional · L6
-              </span>
+              <div className="flex items-center gap-1.5">
+                <SkuIdBadge skuId={simulation.sku_id} />
+                <ImpactDurationBadge days={simulation.impact_duration_days} />
+                <span
+                  className="text-[9px] px-2 py-0.5 rounded font-mono"
+                  style={{ background: "#818CF818", color: "#818CF8", border: "1px solid #818CF830" }}
+                >
+                  Optional · L6
+                </span>
+              </div>
             </div>
             <div className="grid grid-cols-3 gap-2 mb-3">
               {[

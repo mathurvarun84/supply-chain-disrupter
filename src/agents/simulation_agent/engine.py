@@ -185,6 +185,10 @@ def run_monte_carlo(params: SimulationParams) -> SimulationResult:
         trials_run=trials,
         model_version=MODEL_VERSION,
         revenue_impact_samples=revenue_samples,
+        impact_duration_days=(
+            float(params.shock_duration_days) if params.shock_duration_days > 0
+            else params.expected_duration_days
+        ),
     )
 
 
@@ -216,4 +220,8 @@ def run_heuristic_fallback(params: SimulationParams) -> SimulationResult:
         revenue_impact_usd_p90=round(est_revenue * 1.8, 2),
         trials_run=0,
         model_version="heuristic_fallback",
+        impact_duration_days=(
+            float(params.shock_duration_days) if params.shock_duration_days > 0
+            else params.expected_duration_days
+        ),
     )

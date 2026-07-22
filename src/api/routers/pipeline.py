@@ -24,7 +24,6 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from src.agents.data_ingestion_agent import DataIngestionAgent
 from src.agents.demo_injector import build_demo_payload
 from src.agents.langgraph_engine import run_pipeline
-from src.agents.pipeline_bridge import snapshot_run_outputs
 from src.api.schemas import AgentState, PipelineRunRequest, PipelineRunResponse, PipelineStatus
 from src.utils.db_utils import (
     build_idle_agents,
@@ -171,10 +170,14 @@ def _refresh_live_data() -> None:
 
 
 def _run_and_snapshot(run_id: str, payload: Dict[str, Any]) -> None:
-    """BackgroundTask body: run the real pipeline, then bridge L4/L6/L7's
-    output into the dashboard tables. Per-agent failure handling already
-    lives inside run_pipeline() (L1-L4/L7 critical, L5/L6 optional);
-    this wrapper only needs to snapshot whatever GlobalState comes back.
+    """BackgroundTask body: run the real pipeline. Per-agent failure handling
+    already lives inside run_pipeline() (L1-L4/L7 critical, L5/L6 optional);
+    run_pipeline() itself now snapshots L4/L5/L6/L7's dashboard output
+    incrementally, right after each stage finishes (see pipeline_bridge's
+    persist_*_output calls in langgraph_engine.run_pipeline), so each of
+    Screens 2/3/4 shows real data as soon as its own agent completes
+    instead of waiting for the whole run to return. This wrapper no longer
+    needs a final bulk-snapshot step.
 
     Live mode additionally fetches fresh news/weather first (see
     _refresh_live_data) so (a) the Live Feed tab actually has new data to
@@ -192,8 +195,7 @@ def _run_and_snapshot(run_id: str, payload: Dict[str, Any]) -> None:
             payload["disruption_type"] = disruption_type
         finally:
             _RUN_PHASE.pop(run_id, None)
-    final_state = run_pipeline(payload)
-    snapshot_run_outputs(run_id, final_state)
+    run_pipeline(payload)
 
 
 @router.get("/status", response_model=PipelineStatus)

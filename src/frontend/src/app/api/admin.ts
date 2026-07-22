@@ -2,7 +2,12 @@
  * Typed fetch functions for the Admin page — GET/POST /api/admin/*.
  * Backed by src/api/routers/admin.py.
  */
-import type { AdminJobTriggerResponse, AdminStatusResponse } from "../types/admin";
+import type {
+  AdminJobTriggerResponse,
+  AdminStatusResponse,
+  TableListResponse,
+  TableRowsResponse,
+} from "../types/admin";
 import { API_BASE_URL } from "./config";
 
 export const fetchAdminStatus = async (): Promise<AdminStatusResponse> => {
@@ -20,5 +25,23 @@ export const postDatabaseBuild = async (): Promise<AdminJobTriggerResponse> => {
 export const postRagBuild = async (flush: boolean): Promise<AdminJobTriggerResponse> => {
   const res = await fetch(`${API_BASE_URL}/api/admin/rag/build?flush=${flush}`, { method: "POST" });
   if (!res.ok) throw new Error(`admin/rag/build failed: ${res.status}`);
+  return res.json();
+};
+
+export const fetchAdminTables = async (): Promise<TableListResponse> => {
+  const res = await fetch(`${API_BASE_URL}/api/admin/tables`);
+  if (!res.ok) throw new Error(`admin/tables failed: ${res.status}`);
+  return res.json();
+};
+
+export const fetchAdminTableRows = async (
+  tableName: string,
+  page: number,
+  pageSize: number,
+): Promise<TableRowsResponse> => {
+  const res = await fetch(
+    `${API_BASE_URL}/api/admin/tables/${encodeURIComponent(tableName)}?page=${page}&page_size=${pageSize}`,
+  );
+  if (!res.ok) throw new Error(`admin/tables/${tableName} failed: ${res.status}`);
   return res.json();
 };

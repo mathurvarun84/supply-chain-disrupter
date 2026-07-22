@@ -58,4 +58,6 @@ export interface MitigationResponse {
   slack_preview: string | null;
   cost_delta: string | null;
   cost_delta_usd: number | null;
+  sku_id: string | null;
+  impact_duration_days: number | null;
 }

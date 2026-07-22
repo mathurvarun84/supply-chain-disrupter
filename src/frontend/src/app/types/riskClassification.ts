@@ -63,4 +63,6 @@ export interface RiskClassification {
   slack_should_fire: boolean;
   threshold: number;
   from_cache: boolean;
+  sku_id: string | null;
+  impact_duration_days: number | null;
 }

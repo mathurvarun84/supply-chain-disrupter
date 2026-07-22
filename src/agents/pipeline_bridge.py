@@ -44,6 +44,23 @@ URGENCY_MAP = {
 }
 
 
+def _resolve_sku_id(state: GlobalState) -> "str | None":
+    """The single winning SKU_id L4's select_forecast_sku() chose for this
+    run — the same one L5 forecasts on (ForecastResult.sku_id) and L6/L7
+    implicitly act on via state.active_record. Threaded into the
+    simulation/mitigation snapshots too so the dashboard can show one SKU_id
+    across all three panels and make the "same SKU everywhere" guarantee
+    visible, not just true in the data.
+
+    Preference order: forecast_handoff (L4's authoritative snapshot) →
+    active_record (raw source row) — forecast_handoff is None only when L4
+    itself didn't run (e.g. rule-only replay).
+    """
+    if state.forecast_handoff is not None:
+        return state.forecast_handoff.sku_id
+    return (state.active_record or {}).get("sku_id")
+
+
 def persist_risk_classification_output(run_id: str, state: GlobalState) -> None:
     """Map L4's RiskClassificationResult to risk_classification_output."""
     rc = state.risk_classification
@@ -91,6 +108,7 @@ def persist_forecast_output(run_id: str, state: GlobalState) -> None:
             category=sku_label,
             categories=[sku_label],
             series=series,
+            impact_duration_days=fr.impact_duration_days,
         )
         return
 
@@ -114,6 +132,7 @@ def persist_simulation_output(run_id: str, state: GlobalState) -> None:
     """Map L6 Monte Carlo output to simulation_output. Mirrors
     scripts/seed_demo_run.py's original _persist_simulation exactly."""
     sim = state.simulation_result
+    sku_id = _resolve_sku_id(state)
     if sim is None:
         insert_simulation_output(
             run_id=run_id,
@@ -123,6 +142,7 @@ def persist_simulation_output(run_id: str, state: GlobalState) -> None:
             revenue_at_risk_usd=4_200_000.0,
             alternate_route="Cape of Good Hope",
             histogram=build_stockout_histogram([15, 25, 35, 45, 55, 65, 75] * 70),
+            sku_id=sku_id,
         )
         return
 
@@ -161,6 +181,8 @@ def persist_simulation_output(run_id: str, state: GlobalState) -> None:
         days_to_stockout_p10=sim.days_to_stockout_p10,
         days_to_stockout_p50=sim.days_to_stockout_p50,
         days_to_stockout_p90=sim.days_to_stockout_p90,
+        sku_id=sku_id,
+        impact_duration_days=sim.impact_duration_days,
     )
 
 
@@ -180,18 +202,36 @@ def _build_slack_preview(run_id: str, state: GlobalState, action) -> str:
     )
 
 
+def _resolve_duration_days(state: GlobalState) -> "float | None":
+    """L4's canonical disruption duration for this run -- ForecastHandoff.
+    duration_days (the escalated max(news evidence, event
+    shock_duration_days) L4 actually classified on, also read by L5/L6)
+    when available, else RiskClassificationResult.duration_days directly
+    (same value, for runs where L4 had no sku_id to build a handoff)."""
+    if state.forecast_handoff is not None:
+        return state.forecast_handoff.duration_days
+    return state.risk_classification.duration_days if state.risk_classification else None
+
+
 def _mitigation_window_text(state: GlobalState) -> "str | None":
-    """Derived from EventMetadata's shock_duration_days/recovery_window_days —
-    genuine values already computed by the Scenario Analyzer/L2-L3 agents, not
-    a new estimate. None when no event metadata exists for this run (e.g.
-    rule-based-only replay with no live event context)."""
+    """Disruption length + recovery window shown in the Mitigation tab
+    banner. The duration figure prefers _resolve_duration_days() (L4's
+    canonical value, also read by L5/L6) over EventMetadata.
+    shock_duration_days directly, so L7 reports the same duration
+    L4/L5/L6 all agree on rather than an earlier, possibly-shorter raw
+    event value. recovery_window_days has no L4 equivalent (L4 doesn't
+    estimate recovery, only disruption length) so it still comes straight
+    from EventMetadata. None when there's neither a resolved duration nor
+    event metadata to fall back on."""
     metadata = state.event_metadata
-    if metadata is None:
+    duration = _resolve_duration_days(state)
+    if duration is None and metadata is None:
         return None
-    return (
-        f"{metadata.shock_duration_days}-day disruption window, "
-        f"{metadata.recovery_window_days}-day recovery"
-    )
+    duration_days = duration if duration is not None else (metadata.shock_duration_days if metadata else None)
+    recovery_days = metadata.recovery_window_days if metadata else None
+    duration_part = f"{duration_days:g}-day disruption window" if duration_days is not None else "disruption window unknown"
+    recovery_part = f"{recovery_days}-day recovery" if recovery_days is not None else "recovery window unknown"
+    return f"{duration_part}, {recovery_part}"
 
 
 def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
@@ -209,6 +249,8 @@ def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
     rc = state.risk_classification
     slack_alert_fired = bool(rc.critical_flag) if rc is not None else False
     mitigation_window = _mitigation_window_text(state)
+    sku_id = _resolve_sku_id(state)
+    impact_duration_days = _resolve_duration_days(state)
 
     insert_mitigation_rag_trace(run_id, state.mitigation_rag_trace)
 
@@ -223,6 +265,8 @@ def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
             cost_delta_usd=0.0,
             slack_alert_fired=slack_alert_fired,
             mitigation_window=mitigation_window,
+            sku_id=sku_id,
+            impact_duration_days=impact_duration_days,
         )
         return
 
@@ -251,6 +295,8 @@ def persist_mitigation_output(run_id: str, state: GlobalState) -> None:
         cost_delta_usd=cost_delta_usd,
         slack_alert_fired=slack_alert_fired,
         mitigation_window=mitigation_window,
+        sku_id=sku_id,
+        impact_duration_days=impact_duration_days,
     )
 
 

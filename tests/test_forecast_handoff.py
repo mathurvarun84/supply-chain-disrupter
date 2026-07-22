@@ -43,7 +43,9 @@ def test_demand_forecasting_prefers_forecast_handoff(monkeypatch):
     monkeypatch.setattr("src.agents.forecast.agent._write_forecast_to_db", lambda result: None)
 
     state = DummyState(
-        handoff=SimpleNamespace(sku_id="SKU777", risk_score_composite=0.91, risk_label="CRITICAL"),
+        handoff=SimpleNamespace(
+            sku_id="SKU777", risk_score_composite=0.91, risk_label="CRITICAL", duration_days=21.0
+        ),
         active_record={"sku_id": "SKU001", "SKU_ID": "SKU001"},
     )
 
@@ -53,6 +55,7 @@ def test_demand_forecasting_prefers_forecast_handoff(monkeypatch):
     assert captured["disruption_scenario"] == {
         "disruption_flag": 1,
         "risk_score_composite": 0.91,
+        "duration_days": 21.0,
     }
 
 
@@ -91,7 +94,9 @@ def test_demand_forecasting_does_not_force_disruption_flag_for_low_risk(monkeypa
     monkeypatch.setattr("src.agents.forecast.agent._write_forecast_to_db", lambda result: None)
 
     state = DummyState(
-        handoff=SimpleNamespace(sku_id="SKU777", risk_score_composite=0.12, risk_label="LOW"),
+        handoff=SimpleNamespace(
+            sku_id="SKU777", risk_score_composite=0.12, risk_label="LOW", duration_days=None
+        ),
         active_record={"sku_id": "SKU001", "SKU_ID": "SKU001"},
     )
 
@@ -100,4 +105,5 @@ def test_demand_forecasting_does_not_force_disruption_flag_for_low_risk(monkeypa
     assert captured["disruption_scenario"] == {
         "disruption_flag": 0,
         "risk_score_composite": 0.12,
+        "duration_days": None,
     }

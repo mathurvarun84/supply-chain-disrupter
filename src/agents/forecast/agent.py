@@ -279,6 +279,10 @@ class DemandForecastingAgent:
             fc = client.forecast(
                 df=hist[cols], h=len(future_df), freq="W-MON",
                 X_df=x_df, time_col="ds", target_col="y", id_col="unique_id",
+                # nixtla-python (>=0.6) defaults to "timegpt-2.1", which 403s
+                # ("not allowed for your subscription plan") on standard-tier
+                # keys. "timegpt-1" is the model included on all plans.
+                model="timegpt-1",
             )
             return fc["TimeGPT"].clip(lower=0).values
         except Exception as e:
@@ -694,6 +698,7 @@ class DemandForecastingAgent:
                 "disruption_flag": int(future_disrupted["Disruption_Flag"].iloc[0]),
                 "risk_score_composite": round(float(disrupted_risk), 3),
                 "calm_period_risk_score_composite": round(float(calm_risk), 3),
+                "duration_days": scenario.get("duration_days"),
             },
             agent_logs=logs,
         )
@@ -772,11 +777,14 @@ def demand_forecasting_agent(state: Any) -> Dict[str, Any]:
         disruption_scenario = {
             "disruption_flag": 1 if handoff.risk_label in ("HIGH", "CRITICAL") else 0,
             "risk_score_composite": float(handoff.risk_score_composite),
+            "duration_days": handoff.duration_days,
         }
     elif state.risk_classification is not None:
+        rc = state.risk_classification
         disruption_scenario = {
-            "disruption_flag": 1 if state.risk_classification.final_label in ("HIGH", "CRITICAL") else 0,
-            "risk_score_composite": float(state.risk_classification.composite_score),
+            "disruption_flag": 1 if rc.final_label in ("HIGH", "CRITICAL") else 0,
+            "risk_score_composite": float(rc.composite_score),
+            "duration_days": rc.duration_days,
         }
 
     agent = DemandForecastingAgent()
@@ -824,6 +832,7 @@ def demand_forecasting_agent(state: Any) -> Dict[str, Any]:
         mape_improvement_pct_vs_dataset_baseline=result.mape_improvement_pct_vs_dataset_baseline,
         disruption_scenario=result.disruption_scenario,
         forecast_agent_logs=result.agent_logs,
+        impact_duration_days=(result.disruption_scenario or {}).get("duration_days"),
     )
 
     return {

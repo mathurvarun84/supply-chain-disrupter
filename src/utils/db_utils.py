@@ -140,6 +140,13 @@ def ensure_schema() -> None:
             )
             """
         )
+        # impact_duration_days: L4's canonical duration_days, threaded through
+        # ForecastHandoff into L5's disruption_scenario -- shown alongside
+        # Simulation/Mitigation's own copy so the UI can confirm all three
+        # agents used the same disruption length.
+        fo_cols = [row["name"] for row in conn.execute("PRAGMA table_info(forecast_output)")]
+        if fo_cols and "impact_duration_days" not in fo_cols:
+            conn.execute("ALTER TABLE forecast_output ADD COLUMN impact_duration_days REAL")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_forecast_output_run_id ON forecast_output(run_id)"
         )
@@ -171,6 +178,17 @@ def ensure_schema() -> None:
             ):
                 if col not in sim_cols:
                     conn.execute(f"ALTER TABLE simulation_output ADD COLUMN {col} REAL")
+            # sku_id: the same winning SKU_id L4/L5 resolved for this run,
+            # threaded through so the Simulation panel can show it alongside
+            # Forecast/Mitigation and confirm all three agents ran on the
+            # same SKU.
+            if "sku_id" not in sim_cols:
+                conn.execute("ALTER TABLE simulation_output ADD COLUMN sku_id TEXT")
+            # impact_duration_days: the disruption length L6's Monte Carlo
+            # trials actually used (see priors.py's shock_duration
+            # resolution, which now prefers L4's canonical duration).
+            if "impact_duration_days" not in sim_cols:
+                conn.execute("ALTER TABLE simulation_output ADD COLUMN impact_duration_days REAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS mitigation_output (
@@ -198,6 +216,14 @@ def ensure_schema() -> None:
                 )
             if "mitigation_window" not in mo_cols:
                 conn.execute("ALTER TABLE mitigation_output ADD COLUMN mitigation_window TEXT")
+            if "sku_id" not in mo_cols:
+                conn.execute("ALTER TABLE mitigation_output ADD COLUMN sku_id TEXT")
+            # impact_duration_days: numeric twin of mitigation_window's
+            # formatted string, sourced the same way (L4's canonical
+            # duration_days) -- lets the UI render a consistent badge
+            # without parsing the free-text mitigation_window sentence.
+            if "impact_duration_days" not in mo_cols:
+                conn.execute("ALTER TABLE mitigation_output ADD COLUMN impact_duration_days REAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS mitigation_rag_trace (
@@ -1155,6 +1181,7 @@ def insert_forecast_output(
     category: str,
     categories: List[str],
     series: List[Dict[str, Any]],
+    impact_duration_days: Optional[float] = None,
 ) -> None:
     """Persist one Prophet forecast snapshot for a pipeline run.
 
@@ -1167,10 +1194,10 @@ def insert_forecast_output(
     execute_non_query("DELETE FROM forecast_output WHERE run_id = ?", (run_id,))
     execute_non_query(
         """
-        INSERT INTO forecast_output (run_id, category, categories_json, series_json)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO forecast_output (run_id, category, categories_json, series_json, impact_duration_days)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (run_id, category, json.dumps(categories), json.dumps(series)),
+        (run_id, category, json.dumps(categories), json.dumps(series), impact_duration_days),
     )
 
 
@@ -1194,6 +1221,7 @@ def fetch_forecast(run_id: str, category: Optional[str] = None) -> Optional[Dict
         "category": selected,
         "categories": categories,
         "series": series,
+        "impact_duration_days": row["impact_duration_days"] if "impact_duration_days" in row.keys() else None,
     }
 
 
@@ -1210,6 +1238,8 @@ def insert_simulation_output(
     days_to_stockout_p10: Optional[float] = None,
     days_to_stockout_p50: Optional[float] = None,
     days_to_stockout_p90: Optional[float] = None,
+    sku_id: Optional[str] = None,
+    impact_duration_days: Optional[float] = None,
 ) -> None:
     """Persist one SimPy/Monte Carlo snapshot keyed by pipeline run_id.
 
@@ -1218,6 +1248,12 @@ def insert_simulation_output(
     were previously discarded at the pipeline_bridge boundary — None only
     when the heuristic fallback ran (no real Monte Carlo trials) or on
     pre-fix demo/fixture rows.
+
+    sku_id is the same winning SKU_id L4 resolved and L5 forecasted on for
+    this run (see pipeline_bridge.persist_simulation_output) — None only for
+    the no-simulation-result fallback branch. impact_duration_days is the
+    disruption length this simulation's trials actually used (see
+    SimulationResult.impact_duration_days).
     """
     ensure_schema()
     execute_non_query(
@@ -1225,8 +1261,9 @@ def insert_simulation_output(
         INSERT OR REPLACE INTO simulation_output (
             run_id, p10, p50, p90, revenue_at_risk_usd, alternate_route, histogram_json,
             revenue_at_risk_p10_usd, revenue_at_risk_p90_usd,
-            days_to_stockout_p10, days_to_stockout_p50, days_to_stockout_p90
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            days_to_stockout_p10, days_to_stockout_p50, days_to_stockout_p90,
+            sku_id, impact_duration_days
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -1241,6 +1278,8 @@ def insert_simulation_output(
             days_to_stockout_p10,
             days_to_stockout_p50,
             days_to_stockout_p90,
+            sku_id,
+            impact_duration_days,
         ),
     )
 
@@ -1269,6 +1308,8 @@ def fetch_simulation(run_id: str) -> Optional[Dict[str, Any]]:
         "days_to_stockout_p10": row["days_to_stockout_p10"] if "days_to_stockout_p10" in row.keys() else None,
         "days_to_stockout_p50": row["days_to_stockout_p50"] if "days_to_stockout_p50" in row.keys() else None,
         "days_to_stockout_p90": row["days_to_stockout_p90"] if "days_to_stockout_p90" in row.keys() else None,
+        "sku_id": row["sku_id"] if "sku_id" in row.keys() else None,
+        "impact_duration_days": row["impact_duration_days"] if "impact_duration_days" in row.keys() else None,
     }
 
 
@@ -1282,12 +1323,19 @@ def insert_mitigation_output(
     cost_delta_usd: float,
     slack_alert_fired: bool = False,
     mitigation_window: Optional[str] = None,
+    sku_id: Optional[str] = None,
+    impact_duration_days: Optional[float] = None,
 ) -> None:
     """Persist full MitigationResponse payload for a pipeline run_id.
 
     slack_alert_fired must already be server-computed from risk.critical_flag by
     the caller (see pipeline_bridge.persist_mitigation_output) — this function
     just stores whatever it's given, it doesn't recompute the rule.
+
+    sku_id is the same winning SKU_id L4/L5/L6 resolved for this run, so the
+    Mitigation tab can show it alongside Forecast/Simulation and confirm all
+    three agents ran on the same SKU. impact_duration_days is the numeric
+    twin of mitigation_window's formatted string (same source value).
     """
     ensure_schema()
     execute_non_query(
@@ -1295,8 +1343,8 @@ def insert_mitigation_output(
         INSERT OR REPLACE INTO mitigation_output (
             run_id, urgency, ranked_actions_json, rag_query_trace_json,
             india_sourcing_json, slack_preview, cost_delta_usd,
-            slack_alert_fired, mitigation_window
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            slack_alert_fired, mitigation_window, sku_id, impact_duration_days
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             run_id,
@@ -1308,6 +1356,8 @@ def insert_mitigation_output(
             cost_delta_usd,
             int(slack_alert_fired),
             mitigation_window,
+            sku_id,
+            impact_duration_days,
         ),
     )
 
@@ -1483,6 +1533,8 @@ def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
     cost_delta_usd = (
         snapshot["cost_delta_usd"] if snapshot and snapshot["cost_delta_usd"] not in (None, 0.0) else None
     )
+    sku_id = snapshot.get("sku_id") if snapshot else None
+    impact_duration_days = snapshot.get("impact_duration_days") if snapshot else None
 
     if action_row is None:
         ranked_actions = [
@@ -1503,6 +1555,8 @@ def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
             "slack_preview": slack_preview,
             "cost_delta": None,
             "cost_delta_usd": cost_delta_usd,
+            "sku_id": sku_id,
+            "impact_duration_days": impact_duration_days,
         }
 
     ranked_actions = [
@@ -1529,6 +1583,8 @@ def fetch_mitigation(run_id: str) -> Optional[Dict[str, Any]]:
         "slack_preview": slack_preview,
         "cost_delta": action_row["cost_delta"],
         "cost_delta_usd": cost_delta_usd,
+        "sku_id": sku_id,
+        "impact_duration_days": impact_duration_days,
     }
 
 
@@ -1558,7 +1614,13 @@ def insert_risk_classification_output(
 
 def fetch_risk_classification_output(run_id: str) -> Optional[Dict[str, Any]]:
     """Read risk_classification_output for a pipeline run_id. Table:
-    risk_classification_output (see insert_risk_classification_output)."""
+    risk_classification_output (see insert_risk_classification_output).
+
+    ensure_schema() first: GET /api/risk-classification/{run_id} now probes
+    this table on every request (including the legacy order_id path), so a
+    DB that predates this table -- or a test fixture that only seeds the
+    tables it needs -- must not 500 with "no such table"."""
+    ensure_schema()
     rows = execute_query(
         "SELECT * FROM risk_classification_output WHERE run_id = ? ORDER BY id DESC LIMIT 1",
         (run_id,),

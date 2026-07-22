@@ -699,6 +699,7 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
             risk_score_composite=composite_score,
             risk_label=final_label,
             candidates_considered=len(candidates),
+            duration_days=duration_days,
         )
 
     llm_tag = "(ensemble+gpt-4o)" if llm_signal else "(ensemble rule-only)"

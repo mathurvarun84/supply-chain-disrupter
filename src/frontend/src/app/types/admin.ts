@@ -35,3 +35,23 @@ export interface AdminStatusResponse {
   rag_job: AdminJobStatus;
   corpus: CorpusHealth[];
 }
+
+export interface TableSummary {
+  name: string;
+  row_count: number;
+  column_count: number;
+}
+
+export interface TableListResponse {
+  tables: TableSummary[];
+}
+
+export interface TableRowsResponse {
+  table_name: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  total_rows: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}

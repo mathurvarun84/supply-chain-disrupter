@@ -13,7 +13,13 @@
  * follows immediately after to pick up the server-authoritative state.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchAdminStatus, postDatabaseBuild, postRagBuild } from "../api/admin";
+import {
+  fetchAdminStatus,
+  fetchAdminTableRows,
+  fetchAdminTables,
+  postDatabaseBuild,
+  postRagBuild,
+} from "../api/admin";
 import type { AdminStatusResponse } from "../types/admin";
 
 const ADMIN_STATUS_KEY = ["admin-status"];
@@ -56,5 +62,28 @@ export function useBuildRag() {
   return useMutation({
     mutationFn: (flush: boolean) => postRagBuild(flush),
     onSuccess: (resp) => markJobRunning(qc, "rag_job", resp.triggered_at),
+  });
+}
+
+/**
+ * Data Explorer sub-tab — table dropdown. No polling: this list only
+ * changes after a "Recreate DB" run, so the Recreate-DB mutation
+ * invalidating ADMIN_STATUS_KEY doesn't help here; a manual refetch on
+ * demand is enough, we don't wire one yet since no rebuild-triggered
+ * refresh is in this cut's scope.
+ */
+export function useAdminTables() {
+  return useQuery({
+    queryKey: ["admin-tables"],
+    queryFn: fetchAdminTables,
+  });
+}
+
+/** Data Explorer sub-tab — paginated grid for one selected table. */
+export function useAdminTableRows(tableName: string | null, page: number, pageSize: number) {
+  return useQuery({
+    queryKey: ["admin-table-rows", tableName, page, pageSize],
+    queryFn: () => fetchAdminTableRows(tableName as string, page, pageSize),
+    enabled: !!tableName,
   });
 }

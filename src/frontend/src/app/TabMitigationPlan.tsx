@@ -9,6 +9,7 @@ import { useMitigation } from "./hooks/useMitigation";
 import { MitigationActionCard } from "./components/mitigation-plan/MitigationActionCard";
 import { MitigationSidebar } from "./components/mitigation-plan/MitigationSidebar";
 import { MitigationTraceDetails } from "./components/mitigation-plan/MitigationTraceDetails";
+import { ImpactDurationBadge, SkuIdBadge } from "./TabForecastSimulation";
 import type { MitigationUrgency } from "./types/mitigation";
 import type { RiskLevel } from "./types/riskClassification";
 
@@ -86,6 +87,8 @@ export function TabMitigationPlan({ runId }: { runId?: string }) {
               </span>
             )}
             <RiskBadge level={riskLevel} pulse={riskLevel === "CRITICAL"} size="sm" />
+            <SkuIdBadge skuId={data.sku_id} />
+            <ImpactDurationBadge days={data.impact_duration_days} />
             <span className="text-[10px] font-mono rounded-pill border border-border bg-background px-2 py-1 text-muted-strong">
               run_id {data.run_id}
             </span>

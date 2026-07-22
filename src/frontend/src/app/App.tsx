@@ -35,10 +35,11 @@ export default function App() {
   const { data: pipeline } = usePipelineStatus(activeRunId);
   const pipelineRunning = Boolean(pipeline && !pipeline.is_complete && activeRunId);
 
-  // Screen 2 (Risk Classification) fetches once with staleTime: Infinity —
-  // it has no other signal that a new run finished, so it would otherwise
-  // keep showing whatever it first loaded for the browser session. Refetch
-  // it (and the other per-run result tabs) the moment the active run completes.
+  // Screen 2 (Risk Classification) now polls on its own while waiting for
+  // L4 (see useRiskClassification.ts), but staleTime: Infinity means it
+  // still won't notice a *new* run started after switching away and back.
+  // Force a refetch (and the other per-run result tabs) the moment the
+  // active run completes, as a backstop.
   const qc = useQueryClient();
   const invalidatedRunRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -177,7 +178,7 @@ export default function App() {
             {activeTab === 0 ? (
               <TabLiveFeed runId={activeRunId ?? pipeline?.run_id} onTabSwitch={setActiveTab} />
             ) : activeTab === 1 ? (
-              <TabRiskClassification />
+              <TabRiskClassification runId={activeRunId ?? pipeline?.run_id} />
             ) : activeTab === 3 ? (
               <TabMitigationPlan runId={activeRunId ?? pipeline?.run_id} />
             ) : activeTab === 2 ? (

@@ -161,6 +161,12 @@ def run_pipeline(payload: Dict[str, Any]) -> GlobalState:
     would permanently flatten L2/L3/L4's LLM spans to the trace root. Keep
     this manual step-by-step shape; do not "simplify" it into .stream().
     """
+    from src.agents.pipeline_bridge import (
+        persist_forecast_output,
+        persist_mitigation_output,
+        persist_risk_classification_output,
+        persist_simulation_output,
+    )
     from src.utils.db_utils import ensure_schema, ensure_sku_id_columns, set_agent_execution_detail
     from src.utils.observability import agent_span, pipeline_trace
 
@@ -206,6 +212,10 @@ def run_pipeline(payload: Dict[str, Any]) -> GlobalState:
             prev = state
             state = _merge_state(state, risk_classifier_agent(state))
             _capture_detail("L4_risk_classifier", prev, state)
+        # Snapshot immediately, not after the whole run finishes -- Screen 2
+        # follows the active run_id (see src/api/routers/risk.py) and should
+        # light up as soon as L4 has a verdict, same as L5/L6/L7 below.
+        persist_risk_classification_output(run_id, state)
 
         # L5/L6 are optional. Exceptions must propagate INTO agent_span so it
         # can write Failed-Fallback before re-raising; we catch the re-raise outside
@@ -222,6 +232,9 @@ def run_pipeline(payload: Dict[str, Any]) -> GlobalState:
                 update={"agent_logs": state.agent_logs + [f"L5: SKIPPED - {exc}"]}
             )
             set_agent_execution_detail(run_id, "L5_forecast", f"L5: SKIPPED - {exc}")
+        # Snapshot right away (success or Skipped-Optional fallback) so the
+        # Forecast tab shows data as soon as L5 is done, not after L6/L7 too.
+        persist_forecast_output(run_id, state)
 
         try:
             with agent_span(trace, run_id, "L6_simulation") as span:
@@ -235,6 +248,9 @@ def run_pipeline(payload: Dict[str, Any]) -> GlobalState:
                 update={"agent_logs": state.agent_logs + [f"L6: SKIPPED - {exc}"]}
             )
             set_agent_execution_detail(run_id, "L6_simulation", f"L6: SKIPPED - {exc}")
+        # Snapshot right away (success or heuristic fallback) so the
+        # Simulation tab shows data as soon as L6 is done, not after L7 too.
+        persist_simulation_output(run_id, state)
 
         # Match the compiled graph: L7 is required. The span records a failure,
         # and the exception then surfaces to the caller.
@@ -243,5 +259,6 @@ def run_pipeline(payload: Dict[str, Any]) -> GlobalState:
             prev = state
             state = _merge_state(state, mitigation_recommendation_agent(state))
             _capture_detail("L7_mitigation", prev, state)
+        persist_mitigation_output(run_id, state)
 
     return state
