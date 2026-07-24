@@ -226,20 +226,25 @@ def seeded_db(tmp_path, monkeypatch):
     conn.execute(
         """
         CREATE TABLE guardrail_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT, dir TEXT, agent TEXT,
-            pass_count INTEGER, fail_count INTEGER, reason TEXT, updated_at TEXT
+            event_id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            guardrail_name TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            passed INTEGER NOT NULL,
+            reason TEXT NOT NULL DEFAULT '—',
+            record_id TEXT,
+            ts TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
     conn.executemany(
         """
-        INSERT INTO guardrail_events (name, dir, agent, pass_count, fail_count, reason)
+        INSERT INTO guardrail_events (event_id, agent_name, guardrail_name, direction, passed, reason)
         VALUES (?,?,?,?,?,?)
         """,
         [
-            ("prompt-injection-screen", "input", "L2", 10, 1, "seed reason"),
-            ("faithfulness-gate", "output", "L7", 8, 2, "seed fail"),
+            ("evt-1", "L2", "prompt_injection_screen", "input", 1, "seed reason"),
+            ("evt-2", "L7", "ragas_faithfulness_gate", "output", 0, "seed fail"),
         ],
     )
 

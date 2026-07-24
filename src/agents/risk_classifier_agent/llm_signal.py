@@ -9,9 +9,15 @@ Returns LLMSignal or None on failure — never raises.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional  # Any used for trace/span opaque handles
 
 from src.agents.state import LLMSignal, RuleBasedSignal
+from src.utils.guardrails import (
+    log_guardrail_event,
+    validate_output_citation_groundedness,
+    validate_output_fallback_triggered,
+)
 from src.utils.openai_utils import (
     MODEL_REASONING,
     call_openai_structured,
@@ -22,6 +28,13 @@ from src.utils.openai_utils import (
 from src.rag.retriever import build_risk_classifier_context
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_known_sources(rag_context: str) -> List[str]:
+    """Lowercased filenames actually present in the retrieved RAG context
+    (format_rag_chunks output — same 'File: X' pattern mitigation_agent.py's
+    own _extract_known_sources() matches)."""
+    return [m.lower() for m in re.findall(r"File:\s*(\S+)", rag_context)]
 
 _EXPORT_CONTROL_TOP_QUARTILE = 5.40
 
@@ -252,8 +265,23 @@ def run_llm_signal(
             result.confidence_level,
             result.rag_chunks_used,
         )
+
+        # Guardrail (output) — citation groundedness. No existing validation here
+        # (unlike L7's mitigation_agent.py), so this is real detection, not just logging.
+        known_sources = _extract_known_sources(rag_context)
+        citation_check = validate_output_citation_groundedness(result.rag_citations, known_sources)
+        log_guardrail_event(
+            agent_name="L4_llm_signal", guardrail_name=citation_check.guardrail_name, direction="output",
+            passed=citation_check.passed, reason=citation_check.reason, record_id=run_id,
+        )
+
         return result
 
     except Exception as exc:
         logger.warning("Signal 3 LLM failed (non-blocking): %s", exc)
+        fallback_check = validate_output_fallback_triggered("L4_llm_signal", exc)
+        log_guardrail_event(
+            agent_name="L4_llm_signal", guardrail_name=fallback_check.guardrail_name, direction="output",
+            passed=fallback_check.passed, reason=fallback_check.reason, record_id=run_id,
+        )
         return None

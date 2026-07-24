@@ -41,6 +41,13 @@ MODEL_FAST = "gpt-4.1-mini"
 MODEL_REASONING = "gpt-4o"
 TEMPERATURE = 0.0
 
+# Execution/resource guardrails (src/utils/guardrails.py) — timeout budget
+# matches the tenacity retry policy below (stop_after_attempt(3)); cost cap
+# is per run_id, checked against llm_call_log via fetch_cost_by_run().
+EXECUTION_TIMEOUT_SECONDS = 30.0
+MAX_RETRIES = 3
+PER_RUN_COST_CAP_USD = float(os.getenv("PER_RUN_COST_CAP_USD", "0.50"))
+
 T = TypeVar("T", bound=BaseModel)
 
 # Keys always shown in format_sqlite_record even when value is None.
@@ -92,6 +99,7 @@ def call_openai_structured(
     Langfuse generation under the owning agent span (best-effort).
     """
     retry_count_ref = [0]
+    elapsed_ref = [0.0]
 
     @retry(
         stop=stop_after_attempt(3),
@@ -122,6 +130,7 @@ def call_openai_structured(
             raise
 
         elapsed = time.monotonic() - t0
+        elapsed_ref[0] = elapsed
         message = completion.choices[0].message
         if message.parsed is None:
             refusal = getattr(message, "refusal", None) or "unknown refusal"
@@ -153,8 +162,42 @@ def call_openai_structured(
 
         return message.parsed
 
+    if run_id and agent_name:
+        try:
+            from src.utils.db_utils import fetch_cost_by_run
+            from src.utils.guardrails import log_guardrail_event, validate_execution_cost_breaker
+
+            cost_check = validate_execution_cost_breaker(
+                run_id, fetch_cost_by_run(run_id), PER_RUN_COST_CAP_USD
+            )
+            log_guardrail_event(
+                agent_name, "per_run_cost_breaker", "execution",
+                cost_check.passed, cost_check.reason, record_id=run_id,
+            )
+            if not cost_check.passed:
+                raise RuntimeError(cost_check.reason)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("Cost breaker check failed (non-blocking): %s", exc)
+
     try:
-        return _call()
+        result = _call()
+        if run_id and agent_name:
+            try:
+                from src.utils.guardrails import log_guardrail_event, validate_execution_timeout
+
+                timeout_check = validate_execution_timeout(
+                    agent_name, elapsed_ref[0], EXECUTION_TIMEOUT_SECONDS,
+                    retry_count_ref[0], MAX_RETRIES,
+                )
+                log_guardrail_event(
+                    agent_name, "execution_timeout_retry", "execution",
+                    timeout_check.passed, timeout_check.reason, record_id=run_id,
+                )
+            except Exception as guard_exc:
+                logger.warning("Execution timeout guardrail failed (non-blocking): %s", guard_exc)
+        return result
     except Exception as exc:
         if run_id and agent_name:
             try:
@@ -169,6 +212,19 @@ def call_openai_structured(
                 )
             except Exception as obs_exc:
                 logger.warning("Observability failure record failed (non-blocking): %s", obs_exc)
+            try:
+                from src.utils.guardrails import log_guardrail_event, validate_execution_timeout
+
+                timeout_check = validate_execution_timeout(
+                    agent_name, elapsed_ref[0], EXECUTION_TIMEOUT_SECONDS,
+                    retry_count_ref[0], MAX_RETRIES,
+                )
+                log_guardrail_event(
+                    agent_name, "execution_timeout_retry", "execution",
+                    timeout_check.passed, timeout_check.reason, record_id=run_id,
+                )
+            except Exception as guard_exc:
+                logger.warning("Execution timeout guardrail failed (non-blocking): %s", guard_exc)
         raise
 
 

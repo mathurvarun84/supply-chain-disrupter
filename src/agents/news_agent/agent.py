@@ -19,6 +19,13 @@ from typing import Any, Dict, List, Optional
 from src.rag.agent import build_news_signals
 from src.agents.state import GlobalState, NewsAnalysisLLMOutput, NewsRiskSignal
 from src.utils.db_utils import execute_query, fetch_recent_news
+from src.utils.guardrails import (
+    log_guardrail_event,
+    validate_input_length,
+    validate_input_prompt_injection,
+    validate_output_fallback_triggered,
+    validate_output_schema,
+)
 from src.utils.openai_utils import (
     MODEL_FAST,
     build_rag_context,
@@ -295,6 +302,31 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
     live_news_rows = fetch_recent_news(region=order_region or None, limit=20)
     live_news_count = len(live_news_rows)
 
+    # Guardrail (input) — prompt-injection screen on scenario text and each live
+    # headline before any of it reaches the LLM prompt. Flagged rows are excluded
+    # from live_news_rows rather than halting the pipeline (doc §7 behaviour).
+    route_check = validate_input_prompt_injection(metadata.affected_route, source="event_metadata.affected_route")
+    log_guardrail_event(
+        agent_name="L2_news", guardrail_name=route_check.guardrail_name, direction="input",
+        passed=route_check.passed, reason=route_check.reason, record_id=state.run_id,
+    )
+    sanitized_affected_route = (
+        metadata.affected_route if route_check.passed
+        else "[content removed by prompt_injection_screen guardrail]"
+    )
+
+    clean_news_rows = []
+    for row in live_news_rows:
+        headline_check = validate_input_prompt_injection(row.get("title", ""), source="news_signals.title")
+        if not headline_check.passed:
+            log_guardrail_event(
+                agent_name="L2_news", guardrail_name=headline_check.guardrail_name, direction="input",
+                passed=False, reason=headline_check.reason, record_id=state.run_id,
+            )
+            continue
+        clean_news_rows.append(row)
+    live_news_rows = clean_news_rows
+
     # Step 2 — semiconductor history for the order year.
     semiconductor_rows = _fetch_semiconductor_rows(record.get("year"))
 
@@ -327,7 +359,7 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
             user_msg = _build_news_user_message(
                 disruption_type=metadata.disruption_type,
                 affected_port=metadata.affected_port,
-                affected_route=metadata.affected_route,
+                affected_route=sanitized_affected_route,
                 severity_hint=metadata.severity,
                 shock_duration_days=metadata.shock_duration_days,
                 recovery_window_days=metadata.recovery_window_days,
@@ -336,6 +368,15 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
                 live_news_rows=live_news_rows,
                 rag_context=rag_context,
             )
+
+            length_check = validate_input_length(user_msg)
+            log_guardrail_event(
+                agent_name="L2_news", guardrail_name=length_check.guardrail_name, direction="input",
+                passed=length_check.passed, reason=length_check.reason, record_id=state.run_id,
+            )
+            if not length_check.passed:
+                user_msg = user_msg[:8000]
+
             llm_output = call_openai_structured(
                 system_prompt=NEWS_SYSTEM_PROMPT,
                 user_message=user_msg,
@@ -347,10 +388,20 @@ def news_event_analysis_agent(state: GlobalState) -> Dict[str, Any]:
                 trace=state.langfuse_trace,
                 span=state.langfuse_span,
             )
+            schema_check = validate_output_schema(llm_output)
+            log_guardrail_event(
+                agent_name="L2_news", guardrail_name=schema_check.guardrail_name, direction="output",
+                passed=schema_check.passed, reason=schema_check.reason, record_id=state.run_id,
+            )
             all_signals = _llm_output_to_signals(llm_output)
             llm_used = True
         except Exception as exc:
             logger.warning("L2 LLM failed — falling back: %s", exc)
+            fallback_check = validate_output_fallback_triggered("L2_news", exc)
+            log_guardrail_event(
+                agent_name="L2_news", guardrail_name=fallback_check.guardrail_name, direction="output",
+                passed=fallback_check.passed, reason=fallback_check.reason, record_id=state.run_id,
+            )
 
     # Steps 6–7 — fallback chain: rule-based → ChromaDB RAG for unknown disruption types.
     if not all_signals:

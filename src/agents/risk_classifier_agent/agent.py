@@ -36,6 +36,13 @@ from src.utils.db_utils import (
     update_risk_label,
 )
 from src.utils.etl_loader import SPEC_NORM_BOUNDS
+from src.utils.guardrails import (
+    log_guardrail_event,
+    validate_input_null_fields,
+    validate_output_hard_business_rule,
+    validate_output_label_enum,
+    validate_output_numeric_bounds,
+)
 from src.rag.utils import query_chroma_rag
 
 logger = logging.getLogger(__name__)
@@ -478,6 +485,18 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
     if mode == "live" and sdi is None:
         sdi = _fetch_sdi_from_semiconductor_signals(record.get("year"))
 
+    # Guardrail (input) — null/missing critical-field gate before the composite calc.
+    # _compute_components() already has deterministic fallbacks for these fields
+    # (regional defect average, bounds-default raw values) — this only detects/logs.
+    null_check = validate_input_null_fields(
+        {"supply_disruption_index": sdi, "export_control_level": record.get("export_control_level")},
+        ["supply_disruption_index", "export_control_level"],
+    )
+    log_guardrail_event(
+        agent_name="L4_risk_classifier", guardrail_name=null_check.guardrail_name, direction="input",
+        passed=null_check.passed, reason=null_check.reason, record_id=state.run_id,
+    )
+
     components = _compute_components(
         live_weather_severity=state.live_weather_severity,
         natural_disaster_risk=record.get("natural_disaster_risk"),
@@ -491,6 +510,13 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
         composite_score = float(stored_composite)
     else:
         composite_score = _composite_from_components(components)
+
+    # Guardrail (output) — composite_score must lie in [0, 1].
+    bounds_check = validate_output_numeric_bounds(composite_score, "composite_score")
+    log_guardrail_event(
+        agent_name="L4_risk_classifier", guardrail_name=bounds_check.guardrail_name, direction="output",
+        passed=bounds_check.passed, reason=bounds_check.reason, record_id=state.run_id,
+    )
 
     # ── Label derivation ──────────────────────────────────────────────────────
     base_label = _base_label_from_delivery_status(record.get("delivery_status"), composite_score)
@@ -533,6 +559,13 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
 
     # ── Signal 2: DistilBERT (non-blocking) ──────────────────────────────────
     distilbert_signal = run_distilbert_inference(record, duration_days=duration_days)
+
+    # Guardrail (output) — DistilBERTSignal.confidence has no Pydantic bound today.
+    confidence_check = validate_output_numeric_bounds(distilbert_signal.confidence, "distilbert_signal.confidence")
+    log_guardrail_event(
+        agent_name="L4_risk_classifier", guardrail_name=confidence_check.guardrail_name, direction="output",
+        passed=confidence_check.passed, reason=confidence_check.reason, record_id=state.run_id,
+    )
 
     # ── Fetch semiconductor signals for Signal 3 + Judge ─────────────────────
     semiconductor_rows: List[dict] = []
@@ -586,6 +619,23 @@ def risk_classifier_agent(state: GlobalState) -> Dict[str, Any]:
 
     # critical_flag derived from final_label — never from judge alone
     critical_flag = (final_label == "CRITICAL")
+
+    # Guardrail (output) — label-enum enforcement. RiskClassificationResult.final_label
+    # is a plain str, not a Pydantic Literal, so this is real detection, not just logging.
+    label_check = validate_output_label_enum(final_label)
+    log_guardrail_event(
+        agent_name="L4_risk_classifier", guardrail_name=label_check.guardrail_name, direction="output",
+        passed=label_check.passed, reason=label_check.reason, record_id=state.run_id,
+    )
+
+    # Guardrail (output) — hard business-rule override. Confirms critical_flag agrees
+    # with final_label; this WRAPS the enforcement above (delivery-status floor, judge's
+    # Shipping-canceled force-CRITICAL) with a logged event, per constraint C.
+    hard_rule_check = validate_output_hard_business_rule(final_label, critical_flag)
+    log_guardrail_event(
+        agent_name="L4_risk_classifier", guardrail_name=hard_rule_check.guardrail_name, direction="output",
+        passed=hard_rule_check.passed, reason=hard_rule_check.reason, record_id=state.run_id,
+    )
 
     # LLM display fields from Signal 3 or judge reasoning
     llm_enhanced_rationale = None

@@ -17,6 +17,7 @@ from src.agents.state import (
     LLMSignal,
     RuleBasedSignal,
 )
+from src.utils.guardrails import log_guardrail_event, validate_output_fallback_triggered
 from src.utils.openai_utils import (
     MODEL_REASONING,
     call_openai_structured,
@@ -262,4 +263,9 @@ def run_judge(
 
     except Exception as exc:
         logger.warning("Judge failed (non-blocking): %s", exc)
+        fallback_check = validate_output_fallback_triggered("L4_judge", exc)
+        log_guardrail_event(
+            agent_name="L4_judge", guardrail_name=fallback_check.guardrail_name, direction="output",
+            passed=fallback_check.passed, reason=fallback_check.reason, record_id=run_id,
+        )
         return None

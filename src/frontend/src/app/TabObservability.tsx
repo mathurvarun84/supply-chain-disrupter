@@ -316,35 +316,62 @@ function GuardrailsSubTab() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, i) => (
-                <tr
-                  key={i}
-                  className="hover:bg-slate-800/20 transition-colors"
-                  style={{ borderBottom: `1px solid ${BORDER}` }}
-                >
-                  <td className="py-1.5 px-2 text-blue-400">{row.name}</td>
-                  <td className="py-1.5 px-2">
-                    <span
-                      className="px-1.5 py-0.5 rounded"
-                      style={{
-                        background: row.dir === "input" ? "#3B82F614" : "#8B5CF614",
-                        color: row.dir === "input" ? "#60A5FA" : "#A78BFA",
-                      }}
-                    >
-                      {row.dir}
-                    </span>
-                  </td>
-                  <td className="py-1.5 px-2 text-slate-500">{row.agent}</td>
-                  <td className="py-1.5 px-2 text-green-400">{row.pass_count}</td>
-                  <td
-                    className="py-1.5 px-2"
-                    style={{ color: row.fail_count > 0 ? RISK_COLORS.HIGH : "#475569" }}
+              {rows.map((row, i) => {
+                const failed = row.fail_count > 0;
+                // Guardrail reasons on failure are written as
+                // "<what was detected>. Mitigation: <action taken>" (see
+                // src/utils/guardrails.py) — split so the mitigation half
+                // renders visually distinct from the detection detail.
+                const [detail, mitigation] = failed
+                  ? row.last_reason.split(/\s*Mitigation:\s*/)
+                  : [row.last_reason, undefined];
+                return (
+                  <tr
+                    key={i}
+                    className="hover:bg-slate-800/30 transition-colors align-top"
+                    style={{
+                      borderBottom: `1px solid ${BORDER}`,
+                      background: failed ? "#EF444410" : undefined,
+                    }}
                   >
-                    {row.fail_count}
-                  </td>
-                  <td className="py-1.5 px-2 text-slate-600 max-w-[220px] truncate">{row.last_reason}</td>
-                </tr>
-              ))}
+                    <td className="py-1.5 px-2 text-blue-400 whitespace-nowrap">{row.name}</td>
+                    <td className="py-1.5 px-2">
+                      <span
+                        className="px-1.5 py-0.5 rounded"
+                        style={{
+                          background: row.dir === "input" ? "#3B82F614" : "#8B5CF614",
+                          color: row.dir === "input" ? "#60A5FA" : "#A78BFA",
+                        }}
+                      >
+                        {row.dir}
+                      </span>
+                    </td>
+                    <td className="py-1.5 px-2 text-slate-500 whitespace-nowrap">{row.agent}</td>
+                    <td className="py-1.5 px-2 text-green-400">{row.pass_count}</td>
+                    <td
+                      className="py-1.5 px-2 font-semibold"
+                      style={{ color: failed ? RISK_COLORS.HIGH : "#475569" }}
+                    >
+                      {row.fail_count}
+                    </td>
+                    <td className="py-1.5 px-2 min-w-[280px] max-w-[440px] whitespace-normal break-words">
+                      {failed ? (
+                        <div className="space-y-1">
+                          <div className="text-red-300">{detail}</div>
+                          {mitigation && (
+                            <div className="text-emerald-400/90">
+                              <span className="text-emerald-500 font-semibold">Mitigation: </span>
+                              {mitigation}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-slate-600">{row.last_reason}</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

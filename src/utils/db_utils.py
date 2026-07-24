@@ -257,22 +257,47 @@ def ensure_schema() -> None:
             )
             """
         )
+        _migrate_legacy_guardrail_events(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS guardrail_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                dir TEXT NOT NULL,
-                agent TEXT NOT NULL,
-                pass_count INTEGER NOT NULL DEFAULT 0,
-                fail_count INTEGER NOT NULL DEFAULT 0,
-                reason TEXT NOT NULL DEFAULT 'ΓÇö',
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                event_id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                guardrail_name TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                passed INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '—',
+                record_id TEXT,
+                ts TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardrail_events_agent ON guardrail_events(agent_name)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guardrail_events_name ON guardrail_events(guardrail_name)"
+        )
     ensure_simulation_schema()
     ensure_forecast_schema()
+
+
+def _migrate_legacy_guardrail_events(conn: sqlite3.Connection) -> None:
+    """One-time rename: the original guardrail_events table (built ahead of the
+    Safety & Guardrails module design doc) stored pre-aggregated pass_count/
+    fail_count rows seeded by scripts/seed_demo_run.py, with no event_id,
+    passed flag, record_id, or ts column — incompatible with doc §5.2's
+    per-event log. Renaming (not dropping) preserves the old seeded demo
+    numbers for reference; guardrail_events is recreated fresh as the
+    doc-shaped event log."""
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='guardrail_events'"
+    ).fetchone()
+    if not exists:
+        return
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(guardrail_events)")}
+    if "pass_count" in columns and "event_id" not in columns:
+        conn.execute("ALTER TABLE guardrail_events RENAME TO guardrail_events_legacy_aggregate")
 
 
 def _ensure_mitigation_actions_columns(conn: sqlite3.Connection) -> None:
@@ -1873,34 +1898,110 @@ def fetch_prompt_log(limit: int = 100) -> List[Dict[str, Any]]:
 
 
 def insert_guardrail_event(
-    name: str,
+    event_id: str,
+    agent_name: str,
+    guardrail_name: str,
     direction: str,
-    agent: str,
-    pass_count: int,
-    fail_count: int,
-    reason: str = "ΓÇö",
+    passed: bool,
+    reason: str,
+    record_id: Optional[str] = None,
 ) -> None:
-    """Insert or refresh one guardrail_events aggregate row."""
+    """Insert one guardrail_events row (doc §5.2 shape). Sole write path —
+    called by src.utils.guardrails.log_guardrail_event(), never directly."""
     ensure_schema()
     execute_non_query(
         """
-        INSERT INTO guardrail_events (name, dir, agent, pass_count, fail_count, reason)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO guardrail_events
+            (event_id, agent_name, guardrail_name, direction, passed, reason, record_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (name, direction, agent, pass_count, fail_count, reason),
+        (event_id, agent_name, guardrail_name, direction, int(passed), reason, record_id),
     )
 
 
-def fetch_guardrail_events() -> List[Dict[str, Any]]:
-    """Read guardrail_events rows (Screen 5 Guardrails tab)."""
+def fetch_guardrail_events(
+    agent_name: Optional[str] = None,
+    guardrail_name: Optional[str] = None,
+    direction: Optional[str] = None,
+    passed: Optional[bool] = None,
+) -> List[Dict[str, Any]]:
+    """Aggregate guardrail_events by (guardrail_name, direction, agent_name)
+    for the Guardrail Activity table — pass/fail counts plus the most recent
+    reason text, matching the GuardrailEvent response contract already
+    consumed by GET /api/guardrails/events. Filters apply to the underlying
+    events before aggregation. Aggregation is done in Python (not SQL) since
+    row counts are demo-scale and this avoids a fragile "last value" window
+    query in SQLite."""
+    clauses, params = [], []
+    if agent_name:
+        clauses.append("agent_name = ?")
+        params.append(agent_name)
+    if guardrail_name:
+        clauses.append("guardrail_name = ?")
+        params.append(guardrail_name)
+    if direction:
+        clauses.append("direction = ?")
+        params.append(direction)
+    if passed is not None:
+        clauses.append("passed = ?")
+        params.append(int(passed))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = execute_query(
+        f"""
+        SELECT guardrail_name, direction, agent_name, passed, reason, ts
+        FROM guardrail_events
+        {where}
+        ORDER BY ts ASC
+        """,
+        tuple(params),
+    )
+
+    buckets: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for r in rows:
+        key = (r["guardrail_name"], r["direction"], r["agent_name"])
+        bucket = buckets.setdefault(
+            key,
+            {
+                "name": r["guardrail_name"],
+                "dir": r["direction"],
+                "agent": r["agent_name"],
+                "pass_count": 0,
+                "fail_count": 0,
+                "last_reason": "—",
+            },
+        )
+        if r["passed"]:
+            bucket["pass_count"] += 1
+        else:
+            bucket["fail_count"] += 1
+        bucket["last_reason"] = r["reason"] or "—"  # rows are ts ASC, so last write wins
+
+    return list(buckets.values())
+
+
+def count_slack_suppressed_by_guardrail() -> int:
+    """Doc §6 headline metric: how many times an L7 output guardrail (hard
+    business-rule check or the RAGAS faithfulness gate) blocked what would
+    otherwise have been an automatic Slack alert."""
     rows = execute_query(
         """
-        SELECT name, dir, agent, pass_count, fail_count, reason
-        FROM guardrail_events
-        ORDER BY id ASC
+        SELECT COUNT(*) AS n FROM guardrail_events
+        WHERE passed = 0
+          AND agent_name LIKE 'L7%'
+          AND guardrail_name IN ('hard_business_rule_override', 'ragas_faithfulness_gate')
         """
     )
-    return [dict(row) for row in rows]
+    return int(rows[0]["n"]) if rows else 0
+
+
+def fetch_cost_by_run(run_id: str) -> float:
+    """SUM(cost_usd) for one run_id from llm_call_log — used by the per-run
+    cost circuit breaker to check spend before each LLM call."""
+    rows = execute_query(
+        "SELECT ROUND(SUM(cost_usd), 6) AS cost FROM llm_call_log WHERE run_id = ?",
+        (run_id,),
+    )
+    return float(rows[0]["cost"] or 0.0) if rows else 0.0
 
 
 # ---------------------------------------------------------------------------

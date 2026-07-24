@@ -21,6 +21,12 @@ from typing import Any, Dict, Optional, Tuple
 from src.agents.state import GlobalState, WeatherRiskLLMOutput
 from src.agents.weather_agent.client import compute_weather_severity, fetch_open_meteo
 from src.utils.db_utils import fetch_latest_weather_signal
+from src.utils.guardrails import (
+    log_guardrail_event,
+    validate_input_null_fields,
+    validate_output_fallback_triggered,
+    validate_output_schema,
+)
 from src.utils.openai_utils import (
     MODEL_FAST,
     build_rag_context,
@@ -273,6 +279,13 @@ def weather_risk_monitoring_agent(state: GlobalState) -> Dict[str, Any]:
         stats = _extract_weather_stats(payload)
         logger.info("L3: no SQLite row — live API severity=%.3f", numeric_severity)
 
+    # Guardrail (input) — null/missing critical-field gate before severity is used downstream.
+    null_check = validate_input_null_fields({"severity": numeric_severity}, ["severity"])
+    log_guardrail_event(
+        agent_name="L3_weather", guardrail_name=null_check.guardrail_name, direction="input",
+        passed=null_check.passed, reason=null_check.reason, record_id=state.run_id,
+    )
+
     llm_used = False
     llm_output: Optional[WeatherRiskLLMOutput] = None
     final_severity = numeric_severity
@@ -316,11 +329,21 @@ def weather_risk_monitoring_agent(state: GlobalState) -> Dict[str, Any]:
                 trace=state.langfuse_trace,
                 span=state.langfuse_span,
             )
+            schema_check = validate_output_schema(llm_output)
+            log_guardrail_event(
+                agent_name="L3_weather", guardrail_name=schema_check.guardrail_name, direction="output",
+                passed=schema_check.passed, reason=schema_check.reason, record_id=state.run_id,
+            )
             final_severity = llm_output.geo_risk_component
             llm_used = True
         except Exception as exc:
             # Step 8 — rule-based fallback: keep numeric severity from SQLite/API.
             logger.warning("L3 LLM failed — using numeric severity: %s", exc)
+            fallback_check = validate_output_fallback_triggered("L3_weather", exc)
+            log_guardrail_event(
+                agent_name="L3_weather", guardrail_name=fallback_check.guardrail_name, direction="output",
+                passed=fallback_check.passed, reason=fallback_check.reason, record_id=state.run_id,
+            )
 
     log_msg = (
         f"L3: Weather {'(gpt-4.1-mini)' if llm_used else '(fallback)'} | "

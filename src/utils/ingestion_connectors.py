@@ -25,6 +25,7 @@ from src.mcp_servers.news_mcp import fetch_news_headlines
 from src.mcp_servers.weather_mcp import fetch_hub_weather
 from src.utils.db_utils import execute_many, execute_query, get_connection
 from src.utils.ingestion_schema import get_last_fetched_key
+from src.utils.guardrails import log_guardrail_event
 from src.utils.ingestion_validator import DataValidator
 from src.utils.yaml_utils import load_config
 
@@ -321,6 +322,10 @@ class OpenMeteoEnhancedConnector(BaseConnector):
 
         for row in weather_rows:
             ok, errs = DataValidator.validate_weather_event(row)
+            log_guardrail_event(
+                "L1_ingestion", "schema_validation", "input", ok,
+                "Valid weather_event row." if ok else f"Invalid weather_event row: {errs}",
+            )
             if not ok:
                 logger.warning("Invalid weather_event row: %s", errs)
                 skipped += 1
@@ -333,6 +338,10 @@ class OpenMeteoEnhancedConnector(BaseConnector):
                     source=self.SOURCE_NAME, target_table="weather_events",
                     field="derived_weather_severity", value=severity,
                     reason="outlier: |z| > 3.0", row=row, run_id=run_id,
+                )
+                log_guardrail_event(
+                    "L1_ingestion", "rate_limit_circuit_breaker", "input", False,
+                    f"weather_events row quarantined — derived_weather_severity={severity} outlier (|z| > 3.0).",
                 )
                 skipped += 1
                 continue
@@ -560,6 +569,10 @@ class FredConnector(BaseConnector):
         sdi_baseline = DataValidator.get_zscore_baseline("normalized_sdi", "freight_signals")
         for row in rows:
             ok, errs = DataValidator.validate_freight_signal(row)
+            log_guardrail_event(
+                "L1_ingestion", "schema_validation", "input", ok,
+                "Valid freight_signal row." if ok else f"Invalid freight_signal row: {errs}",
+            )
             if not ok:
                 skipped += 1
                 continue
@@ -571,6 +584,10 @@ class FredConnector(BaseConnector):
                     source=self.SOURCE_NAME, target_table="freight_signals",
                     field="normalized_sdi", value=sdi,
                     reason="outlier: |z| > 3.0", row=row, run_id=run_id,
+                )
+                log_guardrail_event(
+                    "L1_ingestion", "rate_limit_circuit_breaker", "input", False,
+                    f"freight_signals row quarantined — normalized_sdi={sdi} outlier (|z| > 3.0).",
                 )
                 skipped += 1
                 continue
@@ -1169,6 +1186,10 @@ class YFinanceConnector(BaseConnector):
                     field="normalized_chip_price_index", value=cpi,
                     reason="outlier: |z| > 3.0", row=row, run_id=run_id,
                 )
+                log_guardrail_event(
+                    "L1_ingestion", "rate_limit_circuit_breaker", "input", False,
+                    f"market_demand_signals row quarantined — normalized_chip_price_index={cpi} outlier (|z| > 3.0).",
+                )
                 skipped += 1
                 continue
             try:
@@ -1207,6 +1228,10 @@ def _persist_news_disruptions(rows: List[Dict[str, Any]]) -> Tuple[int, int]:
     inserted = skipped = 0
     for row in rows:
         ok, errs = DataValidator.validate_news_row(row)
+        log_guardrail_event(
+            "L1_ingestion", "schema_validation", "input", ok,
+            "Valid news row." if ok else f"Invalid news row: {errs}",
+        )
         if not ok:
             skipped += 1
             continue
@@ -1242,6 +1267,10 @@ def _persist_supplier_risk_events(rows: List[Dict[str, Any]]) -> Tuple[int, int]
     inserted = skipped = 0
     for row in rows:
         ok, errs = DataValidator.validate_news_row(row)
+        log_guardrail_event(
+            "L1_ingestion", "schema_validation", "input", ok,
+            "Valid news row." if ok else f"Invalid news row: {errs}",
+        )
         if not ok:
             skipped += 1
             continue

@@ -926,3 +926,49 @@ python evaluation/qa_12_simulation_agent.py
 | `qa_12_simulation_agent.py` | L6, L7 | Monte Carlo impact ranges + `simulation_runs` persistence |
 
 Unit tests (`tests/test_news_weather_agents_v2.py`) cover agent contracts with mocks. QA scripts add real-DB wiring checks and capstone evaluation artifacts.
+
+---
+
+## Test Coverage Report
+
+Full run: `python -m pytest tests -v` — 35 files, 6,744 lines of test code.
+
+```
+350 passed, 23 warnings in 296.89s (0:04:56)
+```
+
+### Test coverage by category (all passing, 350 total)
+
+| Category | Tests | Covers |
+|---|---:|---|
+| TruLens | 53 | Instrumentation wrapper, feedback functions, patch registry/coexistence, node extractors, router, runner, CLI, config |
+| Risk Classifier Agent (L4) | 56 | Rule/DistilBERT/LLM ensemble signals, judge verdict, replay + live modes |
+| RAGAS | 41 | Tracer capture, dataset generation, L4-live evaluation, scorecard/corpus endpoints, `evaluate_all.py` integration |
+| Guardrails | 51 | 16 input/output/execution guardrail functions + event logging; L1 ingestion validator (outlier/conflict/circuit-breaker) |
+| API Endpoints | 52 | Live feed, pipeline run/status, risk classification, admin data explorer — all reading real SQLite/ChromaDB |
+| Agents (L2/L3/L5/L6/L7) | 52 | News/Weather/Mitigation LLM contracts + fallbacks, Simulation (L6) orchestration, L5→L6 forecast handoff |
+| Master Data | 31 | Lite Master v3 workbook/SQLite reload — row counts, `Ops_KPI` sheet |
+| Observability | 9 | `agent_execution_log` timing + status rows |
+| DB Utils | 5 | `llm_call_log`, `risk_classifications` insert/read paths, concurrent-rebuild lock |
+
+**Guardrails detail** — added alongside `src/utils/guardrails.py` (16 functions across input/output/execution families; no live OpenAI/ChromaDB/SQLite dependency, DB writes mocked):
+
+| Guardrail family | Test focus |
+|---|---|
+| Event logging | One row per call; DB errors swallowed (non-blocking); table created by `ensure_schema` |
+| Input (doc §3) | Schema, prompt-injection, length cap, null-field gate, rate-limit breaker, SQL-param safety |
+| Output (doc §4) | Hard business-rule (P0: `critical_flag` vs `final_label`), numeric bounds, citation groundedness, label enum, locked-formula tamper check, fallback-on-failure, RAGAS faithfulness gate |
+| Execution (post-doc) | Timeout+retry, per-run cost breaker — wired once at `call_openai_structured`, not duplicated per agent |
+
+Two integration tests were fixed this session to match the redesigned `guardrail_events` schema (per-event log, not pre-aggregated counts) and the `ragas_faithfulness_gate` naming — both now pass against the real `/api/guardrails/events` endpoint.
+
+### QA scenario scripts (`evaluation/qa_*.py`)
+
+Separate from `pytest` — report-friendly PASS/FAIL scripts run manually against real SQLite/ChromaDB data for capstone evaluation evidence, not CI gates.
+
+| Category | Scripts | Covers |
+|---|---:|---|
+| Risk Classifier Agent (L4) | 6 | Delivery-status override mapping, duration escalation matrix, replay mode (synthetic + real workbook), live mode (Taiwan earthquake, Red Sea crisis) |
+| Integration / Schema | 5 | `GlobalState` backward-compat shims, schema + normalization bounds (synthetic + real), L1→L2→L3 state propagation |
+| L2/L3 News + Weather | 2 | Real SQLite ingestion smoke test, Taiwan earthquake L2+L3 scenario |
+| Simulation (L6/L7) | 1 | Monte Carlo impact ranges + `simulation_runs` persistence |

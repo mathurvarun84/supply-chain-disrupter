@@ -285,12 +285,16 @@ class PromptLogRow(BaseModel):
 
 
 class GuardrailEvent(BaseModel):
+    """Aggregated view of guardrail_events (doc §5.2), grouped by
+    (guardrail_name, direction, agent_name). Consumed by the Guardrails
+    sub-tab's Activity table in TabObservability.tsx."""
+
     name: str
-    dir: Literal["input", "output"]
+    dir: Literal["input", "output", "execution"]
     agent: str
     pass_count: int
     fail_count: int
-    reason: str
+    last_reason: str
 
 
 class RagasScore(BaseModel):

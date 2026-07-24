@@ -82,5 +82,5 @@ def test_gold_dataset_differs_from_day1_fixture_when_file_exists():
 def test_faithfulness_gate_reason_matches_guardrails_endpoint():
     """Guardrails faithfulness-gate row is served from guardrail_events table."""
     guard_resp = client.get("/api/guardrails/events")
-    gate_row = next(r for r in guard_resp.json() if r["name"] == "faithfulness-gate")
-    assert "0.61 < 0.75" in gate_row["reason"] or "faithfulness" in gate_row["reason"].lower()
+    gate_row = next(r for r in guard_resp.json() if r["name"] == "ragas_faithfulness_gate")
+    assert "0.61 < 0.75" in gate_row["last_reason"] or "faithfulness" in gate_row["last_reason"].lower()
